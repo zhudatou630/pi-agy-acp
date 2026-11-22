@@ -1,0 +1,12 @@
+[
+ {"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"pi-agy-acp-probe","version":"0.0.0"}}},
+ {"method":"session/new","params":{"cwd":"/tmp/agy-probe/ws","mcpServers":[]}},
+ {"method":"session/set_config_option","params":{"sessionId":"$SID","configId":"model","value":"gemini-3.8-flash"}},
+ {"method":"session/set_config_option","params":{"sessionId":"$SID","configId":"thought_level","value":"low"}},
+ {"method":"session/prompt","noWait":true,"timeout":120000,"params":{"sessionId":"$SID","prompt":[{"type":"text","text":"Write a numbered list of 60 different fruits, one per line, with a 10-word description each. Do not use tools."}]}},
+ {"sleep":5000},
+ {"method":"session/prompt","noWait":true,"timeout":120000,"params":{"sessionId":"$SID","prompt":[{"type":"text","text":"STEER: stop the list now and just say banana."}]}},
+ {"sleep":25000},
+ {"method":"session/prompt","timeout":120000,"params":{"sessionId":"$SID","prompt":[{"type":"text","text":"/compact"}]}},
+ {"sleep":500}
+]

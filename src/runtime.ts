@@ -1,0 +1,678 @@
+// Shared runtime: one lazily started `agy acp` per pi process, multiplexing ACP sessions.
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { AcpError, AcpExitError, AcpProcess } from "./acp.ts";
+import { BindingStore } from "./bindings.ts";
+import { type Catalog, loadCatalog, mapThinkingLevel, saveCatalog } from "./catalog.ts";
+import { DebugLog } from "./debug.ts";
+import { isTerminal, mergeToolUpdate, type ToolState } from "./mirror.ts";
+
+export const VERSION = "0.1.0";
+
+/** ~/.pi/agent/pi-agy-acp/config.json */
+export interface RuntimeConfig {
+  agyPath?: string;
+  /** Extra `agy acp` flags, e.g. --disable-telemetry. */
+  extraArgs: string[];
+}
+
+export const REPLAY_MAX_CHARS = 60_000;
+export const CANCEL_WAIT_MS = 10_000;
+const IDLE_SHUTDOWN_MS = 600_000;
+const WATCHDOG_MS = 600_000;
+
+export class AuthRequiredError extends Error {
+  constructor() {
+    super("Antigravity 未登录。请运行 /agy login 按提示完成 Google 登录，或在终端执行 `agy` 登录后再发送。");
+    this.name = "AuthRequiredError";
+  }
+}
+
+export class AgyMissingError extends Error {
+  constructor() {
+    super("找不到 agy 可执行文件。请安装 Antigravity CLI（确认 `agy --version` 可用），或在 ~/.pi/agent/pi-agy-acp/config.json 里设置 agyPath。");
+    this.name = "AgyMissingError";
+  }
+}
+
+export function isAuthError(err: unknown): boolean {
+  return err instanceof AcpError && (err.code === -32000 || (err.code === -32603 && /^No browser is available/.test(err.message)));
+}
+
+// ---------------------------------------------------------------------------
+
+// Symbol.for: extension instances (and /reload) re-evaluate this module, the shared runtime does not.
+const TIMEOUT = Symbol.for("pi-agy-acp.timeout");
+
+export class AsyncQueue<T> {
+  private items: T[] = [];
+  private waiter: ((v: T | typeof TIMEOUT) => void) | undefined;
+
+  push(item: T): void {
+    if (this.waiter) {
+      const w = this.waiter;
+      this.waiter = undefined;
+      w(item);
+    } else this.items.push(item);
+  }
+
+  unshift(item: T): void {
+    this.items.unshift(item);
+  }
+
+  /** Take whatever is queued right now. */
+  drain(): T[] {
+    return this.items.splice(0);
+  }
+
+  next(timeoutMs?: number, signal?: AbortSignal): Promise<T | typeof TIMEOUT> {
+    if (this.items.length) return Promise.resolve(this.items.shift()!);
+    return new Promise((resolve) => {
+      let timer: NodeJS.Timeout | undefined;
+      const finish = (v: T | typeof TIMEOUT) => {
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        this.waiter = undefined;
+        resolve(v);
+      };
+      const onAbort = () => finish(TIMEOUT);
+      this.waiter = finish;
+      if (timeoutMs !== undefined) timer = setTimeout(() => finish(TIMEOUT), timeoutMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+}
+export { TIMEOUT };
+
+export type TurnItem =
+  | { kind: "update"; update: any }
+  | { kind: "end"; result?: any; error?: Error }
+  | { kind: "yield" };
+
+export class Turn {
+  readonly queue = new AsyncQueue<TurnItem>();
+  latestPrompt = 0;
+  ended = false;
+  /** The end item has been consumed by a provider stream. */
+  closed = false;
+  cancelled = false;
+  /** A provider stream is consuming the queue (steer may interrupt it). */
+  pumping = false;
+  pendingPermissions = 0;
+  /** Hashes of user inputs sent to agy directly by an immediate steer, one entry per send. */
+  readonly delivered: string[] = [];
+  /** Hash of the prompt that opened the turn (retry guard). */
+  promptKey = "";
+  lastPlan = "";
+  readonly abort = new AbortController();
+  lastActivity = Date.now();
+}
+
+/** What the runtime needs from the pi side of a session (one extension instance). */
+export interface SessionOwner {
+  ctx(): any | undefined;
+  onTitle?(title: string): void;
+}
+
+export class AcpSession {
+  readonly id: string;
+  readonly cwd: string;
+  configOptions: any[] = [];
+  tools = new Map<string, ToolState>();
+  /** Tool ids already mirrored into pi. */
+  emitted = new Set<string>();
+  private toolWaiters = new Map<string, Set<() => void>>();
+  turn: Turn | undefined;
+  idleBuffer: any[] = [];
+  owner: SessionOwner | undefined;
+  usage: { used?: number; size?: number } = {};
+  /** Cancel never settled: do not reuse without close + resume. */
+  broken = false;
+  ephemeral = false;
+
+  constructor(id: string, cwd: string, setup: any) {
+    this.id = id;
+    this.cwd = cwd;
+    this.setConfigOptions(setup?.configOptions);
+  }
+
+  setConfigOptions(options: any): void {
+    if (Array.isArray(options)) this.configOptions = options;
+  }
+
+  current(id: string): string | undefined {
+    return this.configOptions.find((o) => o.id === id)?.currentValue;
+  }
+
+  values(id: string): string[] {
+    const opt = this.configOptions.find((o) => o.id === id);
+    if (!opt || !Array.isArray(opt.options)) return [];
+    return opt.options.flatMap((o: any) => (Array.isArray(o.options) ? o.options : [o])).map((o: any) => o.value);
+  }
+
+  get activeTurn(): Turn | undefined {
+    return this.turn && !this.turn.closed ? this.turn : undefined;
+  }
+
+  notifyTool(id: string): void {
+    for (const w of this.toolWaiters.get(id) ?? []) w();
+  }
+
+  /** Resolve when the tool reaches a terminal state (or onChange on every update). */
+  waitTool(id: string, signal: AbortSignal | undefined, onChange: (s: ToolState) => void): Promise<ToolState> {
+    return new Promise((resolve) => {
+      const check = () => {
+        const s = this.tools.get(id);
+        if (!s) return;
+        onChange(s);
+        if (isTerminal(s)) {
+          set.delete(check);
+          signal?.removeEventListener("abort", onAbort);
+          resolve(s);
+        }
+      };
+      const onAbort = () => {
+        const s = this.tools.get(id);
+        if (s && !isTerminal(s)) s.aborted = "已取消";
+        check();
+      };
+      const set = this.toolWaiters.get(id) ?? new Set<() => void>();
+      this.toolWaiters.set(id, set);
+      set.add(check);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+      else check();
+    });
+  }
+
+  /** Forget finished, already-mirrored tools (called when a new turn starts). */
+  pruneTools(): void {
+    for (const [id, s] of this.tools) {
+      if (isTerminal(s) && this.emitted.has(id)) {
+        this.tools.delete(id);
+        this.emitted.delete(id);
+        this.toolWaiters.delete(id);
+      }
+    }
+  }
+
+  /** Mark every non-terminal tool and wake waiters. */
+  settleTools(mark: (s: ToolState) => void): void {
+    for (const s of this.tools.values()) {
+      if (!isTerminal(s)) {
+        mark(s);
+        this.notifyTool(s.id);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+export class Runtime {
+  readonly home: string;
+  readonly config: RuntimeConfig;
+  readonly debug: DebugLog;
+  readonly store: BindingStore;
+  catalog: Catalog;
+  readonly catalogFile: string;
+  proc: AcpProcess | undefined;
+  init: any;
+  private starting: Promise<AcpProcess> | undefined;
+  readonly sessions = new Map<string, AcpSession>();
+  /** Catalog-change callbacks of live sessions. */
+  readonly listeners = new Set<() => void>();
+  private idleTimer: NodeJS.Timeout | undefined;
+  private catalogRefresh: Promise<Catalog> | undefined;
+  lastExit: string | undefined;
+
+  constructor(home: string) {
+    this.home = home;
+    this.config = { extraArgs: [], ...readJson(path.join(home, "config.json")) };
+    this.debug = new DebugLog(path.join(home, "logs"));
+    if (process.env.ACP_DEBUG) this.debug.enable(process.env.ACP_DEBUG);
+    this.store = new BindingStore(path.join(home, "bindings"));
+    this.store.prune(60 * 24 * 3600_000);
+    this.catalogFile = path.join(home, "catalog.json");
+    this.catalog = loadCatalog(this.catalogFile);
+    process.once("exit", () => this.proc?.killSync());
+  }
+
+  agyPath(): string | undefined {
+    const candidates = [this.config.agyPath, process.env.PI_AGY_BIN];
+    for (const dir of (process.env.PATH ?? "").split(path.delimiter)) if (dir) candidates.push(path.join(dir, "agy"));
+    candidates.push(path.join(os.homedir(), ".local/bin/agy"));
+    for (const c of candidates) {
+      if (!c) continue;
+      try { fs.accessSync(c, fs.constants.X_OK); if (fs.statSync(c).isFile()) return c; } catch {}
+    }
+    return undefined;
+  }
+
+  childEnv(extra: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      // pi session details and pi-web's Node bootstrap do not belong in agy's tool environment.
+      if (k.startsWith("PI_") || k === "NODE_OPTIONS") continue;
+      env[k] = v;
+    }
+    for (const [k, v] of Object.entries(extra)) {
+      if (v === undefined) delete env[k];
+      else env[k] = v;
+    }
+    return env;
+  }
+
+  async ensure(): Promise<AcpProcess> {
+    this.armIdle(); // every use pushes idle shutdown back
+    if (this.proc?.alive && this.init) return this.proc;
+    if (this.starting) return this.starting;
+    this.starting = (async () => {
+      const command = this.agyPath();
+      if (!command) throw new AgyMissingError();
+      const proc = new AcpProcess({
+        command,
+        args: ["acp", ...this.config.extraArgs],
+        env: this.childEnv(),
+        cwd: os.homedir(),
+        debug: this.debug,
+        onNotification: (method, params) => this.onNotification(method, params),
+        onRequest: (method, params) => this.onRequest(method, params),
+        onExit: (info) => this.onExit(proc, info),
+      });
+      this.proc = proc;
+      this.init = await proc.request("initialize", {
+        protocolVersion: 1,
+        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+        clientInfo: { name: "pi-agy-acp", version: VERSION },
+      }, 30_000);
+      return proc;
+    })();
+    try {
+      return await this.starting;
+    } catch (err) {
+      // a process whose handshake failed would otherwise stay alive, unreachable
+      const failed = this.proc;
+      this.proc = undefined;
+      this.init = undefined;
+      void failed?.kill();
+      throw err;
+    } finally {
+      this.starting = undefined;
+    }
+  }
+
+  get agyVersion(): string | undefined {
+    return this.init?.agentInfo?.version;
+  }
+
+  get supportsImages(): boolean {
+    return this.init?.agentCapabilities?.promptCapabilities?.image === true;
+  }
+
+  // -- sessions --------------------------------------------------------------
+
+  async listSessionIds(): Promise<Set<string>> {
+    const proc = await this.ensure();
+    const ids = new Set<string>();
+    let cursor: string | undefined;
+    for (let page = 0; page < 50; page++) {
+      const res = await proc.request("session/list", cursor ? { cursor } : {}, 30_000);
+      for (const s of res?.sessions ?? []) ids.add(s.sessionId);
+      cursor = res?.nextCursor;
+      if (!cursor) break;
+    }
+    return ids;
+  }
+
+  async newSession(cwd: string): Promise<AcpSession> {
+    const proc = await this.ensure();
+    try {
+      const res = await proc.request("session/new", { cwd, mcpServers: [] }, 60_000);
+      const s = new AcpSession(res.sessionId, cwd, res);
+      this.sessions.set(s.id, s);
+      this.afterSetup(res);
+      return s;
+    } catch (err) {
+      if (isAuthError(err)) throw new AuthRequiredError();
+      throw err;
+    }
+  }
+
+  /**
+   * Reattach a persisted ACP session. Uses session/list first because agy "loads" unknown ids
+   * as empty sessions instead of failing. Returns undefined when the session is gone.
+   */
+  async resumeSession(id: string, cwd: string): Promise<AcpSession | undefined> {
+    const live = this.sessions.get(id);
+    if (live && !live.broken) return live;
+    const proc = await this.ensure();
+    try {
+      if (live?.broken) {
+        this.sessions.delete(id);
+        await proc.request("session/close", { sessionId: id }, 10_000).catch(() => {});
+      }
+      const ids = await this.listSessionIds();
+      if (!ids.has(id)) return undefined;
+      const res = await proc.request("session/resume", { sessionId: id, cwd, mcpServers: [] }, 60_000);
+      const s = new AcpSession(id, cwd, res);
+      this.sessions.set(id, s);
+      this.afterSetup(res);
+      return s;
+    } catch (err) {
+      if (isAuthError(err)) throw new AuthRequiredError();
+      if (err instanceof AcpExitError) throw err;
+      this.debug.write("resume-failed", String(err));
+      return undefined;
+    }
+  }
+
+  async closeSession(id: string): Promise<void> {
+    const s = this.sessions.get(id);
+    this.sessions.delete(id);
+    if (s) {
+      this.cancel(s);
+      this.endTurnNow(s, new Error("agy 会话已关闭"));
+      s.settleTools((t) => { t.aborted = "会话已关闭"; });
+    }
+    if (this.proc?.alive) await this.proc.request("session/close", { sessionId: id }, 10_000).catch(() => {});
+  }
+
+  /** Bring model / thought_level to the wanted values (agy resets them on resume). */
+  async applyConfig(s: AcpSession, want: { model?: string; piLevel?: string }): Promise<void> {
+    if (want.model && s.current("model") !== want.model) await this.setOption(s, "model", want.model);
+    const levels = s.values("thought_level");
+    const level = mapThinkingLevel(want.piLevel, levels);
+    if (level && s.current("thought_level") !== level) await this.setOption(s, "thought_level", level);
+  }
+
+  private async setOption(s: AcpSession, configId: string, value: string): Promise<void> {
+    const proc = await this.ensure();
+    try {
+      const res = await proc.request("session/set_config_option", { sessionId: s.id, configId, value }, 30_000);
+      s.setConfigOptions(res?.configOptions);
+    } catch (err) {
+      if (err instanceof AcpError) throw new AcpError(err.method, err.code, `agy 拒绝设置 ${configId}=${value}：${err.message}`);
+      throw err;
+    }
+  }
+
+  /** Start a turn, or steer the running one: agy supersedes the previous prompt natively. */
+  async prompt(s: AcpSession, blocks: any[]): Promise<Turn> {
+    const proc = await this.ensure();
+    let turn = s.activeTurn && !s.activeTurn.ended ? s.activeTurn : undefined;
+    if (!turn) {
+      s.turn = turn = new Turn();
+      s.pruneTools();
+      s.usage.used = undefined; // turns without usage_update (e.g. /compact) must not reuse the last value
+      this.armWatchdog(s, turn);
+    }
+    const n = ++turn.latestPrompt;
+    turn.lastActivity = Date.now();
+    proc.request("session/prompt", { sessionId: s.id, prompt: blocks }).then(
+      (result) => this.endTurn(s, turn, n, { result }),
+      (error: Error) => this.endTurn(s, turn, n, { error: isAuthError(error) ? new AuthRequiredError() : error }),
+    );
+    return turn;
+  }
+
+  private endTurn(s: AcpSession, turn: Turn, n: number, item: { result?: any; error?: Error }): void {
+    if (turn.latestPrompt !== n || turn.ended) return; // superseded by a steer
+    turn.ended = true;
+    s.settleTools((t) => {
+      if (item.error) t.aborted = item.error.message;
+      else if (turn.cancelled) t.aborted = "已取消";
+      else t.background = true;
+    });
+    turn.abort.abort();
+    turn.queue.push({ kind: "end", ...item });
+  }
+
+  /** End the running turn locally (watchdog, close, exit) and ignore whatever agy returns later. */
+  private endTurnNow(s: AcpSession, error: Error): void {
+    const turn = s.turn;
+    if (!turn || turn.ended) return;
+    turn.latestPrompt++;
+    turn.ended = true;
+    turn.abort.abort();
+    turn.queue.push({ kind: "end", error });
+  }
+
+  cancel(s: AcpSession): void {
+    const turn = s.activeTurn;
+    if (!turn || turn.ended || turn.cancelled) return;
+    turn.cancelled = true;
+    turn.abort.abort(); // dismiss permission dialogs
+    this.proc?.notify("session/cancel", { sessionId: s.id });
+  }
+
+  private armWatchdog(s: AcpSession, turn: Turn): void {
+    const tick = () => {
+      if (turn.ended) return;
+      const busy = turn.pendingPermissions > 0 || [...s.tools.values()].some((t) => !isTerminal(t));
+      if (!busy && Date.now() - turn.lastActivity > WATCHDOG_MS) {
+        this.cancel(s);
+        this.endTurnNow(s, new Error(`agy 超过 ${WATCHDOG_MS / 60000} 分钟没有任何输出，已取消本轮`));
+        s.broken = true;
+        return;
+      }
+      setTimeout(tick, 30_000).unref();
+    };
+    setTimeout(tick, 30_000).unref();
+  }
+
+  // -- inbound ---------------------------------------------------------------
+
+  private onNotification(method: string, params: any): void {
+    if (method !== "session/update") return;
+    const s = this.sessions.get(params?.sessionId);
+    const u = params?.update;
+    if (!u) return;
+    if (!s) return;
+    const turn = s.turn && !s.turn.ended ? s.turn : undefined;
+    if (turn) turn.lastActivity = Date.now();
+    switch (u.sessionUpdate) {
+      case "tool_call":
+      case "tool_call_update": {
+        const state = mergeToolUpdate(s.tools.get(u.toolCallId), u);
+        s.tools.set(state.id, state);
+        if (!turn && !isTerminal(state)) state.background = true; // started on its own between turns
+        s.notifyTool(state.id);
+        // updates of shown tools go straight to their mirror waiters, not through the stream
+        if (turn && !s.emitted.has(state.id)) turn.queue.push({ kind: "update", update: u });
+        else if (!turn && (state.status === "completed" || state.status === "failed")) this.background(s, { ...u, title: state.title });
+        return;
+      }
+      case "agent_message_chunk":
+      case "agent_thought_chunk":
+      case "plan":
+        if (turn) turn.queue.push({ kind: "update", update: u });
+        else this.background(s, u);
+        return;
+      case "usage_update":
+        s.usage = { used: u.used, size: u.size };
+        this.noteContextWindow(s, u.size);
+        return;
+      case "config_option_update":
+        s.setConfigOptions(u.configOptions);
+        return;
+      case "current_mode_update": {
+        const mode = s.configOptions.find((o) => o.id === "mode");
+        if (mode) mode.currentValue = u.currentModeId;
+        return;
+      }
+      case "session_info_update":
+        if (u.title) s.owner?.onTitle?.(u.title);
+        return;
+      default:
+        return; // user_message_chunk only appears in load replays, which we do not use
+    }
+  }
+
+  private background(s: AcpSession, u: any): void {
+    if (s.ephemeral) return;
+    s.idleBuffer.push(u); // shown folded at the start of the next reply, no toast
+  }
+
+  private async onRequest(method: string, params: any): Promise<unknown> {
+    if (method !== "session/request_permission") throw new AcpError(method, -32601, `pi-agy-acp 不支持 ${method}`);
+    const s = this.sessions.get(params?.sessionId);
+    const cancelled = { outcome: { outcome: "cancelled" } };
+    if (!s) return cancelled;
+    const tc = params.toolCall ?? {};
+    if (tc.toolCallId) {
+      const state = mergeToolUpdate(s.tools.get(tc.toolCallId), tc);
+      s.tools.set(state.id, state);
+    }
+    const options: any[] = Array.isArray(params.options) ? params.options : [];
+    const isQuestion = typeof tc.toolCallId === "string" && tc.toolCallId.startsWith("interaction_");
+    if (!isQuestion) {
+      // Full access, like pi itself. Maintenance (ephemeral) sessions never run tools,
+      // and nothing more runs once the user pressed Stop.
+      const pick = s.ephemeral || s.turn?.cancelled
+        ? options.find((o) => o.kind === "reject_once")
+        : options.find((o) => o.kind === "allow_once") ?? options.find((o) => o.kind === "allow_always");
+      return pick ? { outcome: { outcome: "selected", optionId: pick.optionId } } : cancelled;
+    }
+    // agy asking the user a question (pick one of its options) is not an approval: ask.
+    const turn = s.activeTurn;
+    if (turn) turn.pendingPermissions++;
+    try {
+      const ctx = s.owner?.ctx();
+      if (!ctx?.hasUI || !ctx.ui) return cancelled;
+      const choice = await askQuestion(ctx, tc, options, turn?.abort.signal);
+      return choice ? { outcome: { outcome: "selected", optionId: choice } } : cancelled;
+    } catch {
+      return cancelled;
+    } finally {
+      if (turn) { turn.pendingPermissions--; turn.lastActivity = Date.now(); }
+    }
+  }
+
+  private onExit(proc: AcpProcess, info: { code: number | null; signal: string | null; stderr: string }): void {
+    if (this.proc !== proc) return;
+    this.proc = undefined;
+    this.init = undefined;
+    this.lastExit = `code=${info.code} signal=${info.signal}`;
+    const err = new AcpExitError(`agy 进程退出（${this.lastExit}）。下次发送会自动重启并接回会话；本轮不会自动重发，以免重复执行操作。`);
+    for (const s of this.sessions.values()) {
+      s.settleTools((t) => { t.aborted = "agy 进程已退出"; });
+      this.endTurnNow(s, err);
+    }
+    this.sessions.clear();
+    this.clearIdle();
+  }
+
+  // -- catalog ---------------------------------------------------------------
+
+  private afterSetup(res: any): void {
+    const tier = res?._meta?.antigravity?.tier?.name;
+    if (tier) this.catalog.tier = tier;
+    const stale = !this.catalog.fetchedAt || this.catalog.agyVersion !== this.agyVersion || Date.now() - this.catalog.fetchedAt > 24 * 3600_000;
+    if (stale) void this.refreshCatalog().catch((err) => this.debug.write("catalog-error", String(err)));
+  }
+
+  /** Probe every model's thought_level options in a throwaway session (config RPCs only, no prompts). */
+  refreshCatalog(): Promise<Catalog> {
+    this.catalogRefresh ??= this.probeCatalog().finally(() => { this.catalogRefresh = undefined; });
+    return this.catalogRefresh;
+  }
+
+  private async probeCatalog(): Promise<Catalog> {
+    let probe: AcpSession | undefined;
+    try {
+      const proc = await this.ensure();
+      const res = await proc.request("session/new", { cwd: os.homedir(), mcpServers: [] }, 60_000);
+      probe = new AcpSession(res.sessionId, os.homedir(), res);
+      probe.ephemeral = true;
+      this.sessions.set(probe.id, probe);
+      const modelOpt = probe.configOptions.find((o) => o.id === "model");
+      const models: Catalog["models"] = [];
+      const old = new Map(this.catalog.models.map((m) => [m.id, m]));
+      for (const o of modelOpt?.options ?? []) {
+        const r = await proc.request("session/set_config_option", { sessionId: probe.id, configId: "model", value: o.value }, 30_000);
+        probe.setConfigOptions(r?.configOptions);
+        models.push({ id: o.value, name: o.name ?? o.value, levels: probe.values("thought_level"), contextWindow: old.get(o.value)?.contextWindow });
+      }
+      if (models.length) {
+        this.catalog = { ...this.catalog, v: 1, models, agyVersion: this.agyVersion, fetchedAt: Date.now() };
+        saveCatalog(this.catalogFile, this.catalog);
+        this.emitCatalog();
+      }
+      return this.catalog;
+    } finally {
+      if (probe) await this.closeSession(probe.id);
+    }
+  }
+
+  private noteContextWindow(s: AcpSession, size: unknown): void {
+    if (typeof size !== "number" || size <= 0) return;
+    const m = this.catalog.models.find((x) => x.id === s.current("model"));
+    if (!m || m.contextWindow === size) return;
+    m.contextWindow = size;
+    saveCatalog(this.catalogFile, this.catalog);
+    this.emitCatalog();
+  }
+
+  private emitCatalog(): void {
+    for (const l of this.listeners) {
+      try { l(); } catch { this.listeners.delete(l); } // a disposed session's pi API throws
+    }
+  }
+
+  // -- lifecycle -------------------------------------------------------------
+
+  private clearIdle(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = undefined;
+  }
+
+  armIdle(): void {
+    this.clearIdle();
+    this.idleTimer = setTimeout(() => {
+      const busy = this.starting || this.proc?.busy || [...this.sessions.values()].some((s) => s.turn && !s.turn.ended);
+      if (busy) return this.armIdle();
+      void this.shutdown();
+    }, IDLE_SHUTDOWN_MS);
+    this.idleTimer.unref();
+  }
+
+  async shutdown(): Promise<void> {
+    this.clearIdle();
+    const proc = this.proc;
+    if (!proc) return;
+    await Promise.all([...this.sessions.keys()].map((id) => this.closeSession(id)));
+    if (this.proc === proc) { this.proc = undefined; this.init = undefined; } // new work starts a fresh process
+    await proc.kill();
+  }
+}
+
+/** agy asks the user to pick one of its options (toolCallId interaction_*). */
+async function askQuestion(ctx: any, tc: any, options: any[], signal?: AbortSignal): Promise<string | undefined> {
+  const seen = new Map<string, number>();
+  const labels = options.map((o) => {
+    const l = String(o.name || o.optionId);
+    const n = (seen.get(l) ?? 0) + 1;
+    seen.set(l, n);
+    return n > 1 ? `${l} (${n})` : l;
+  });
+  const picked = await ctx.ui.select(`agy 提问：${tc.title || "请选择"}`, labels, { timeout: 600_000, signal });
+  return picked === undefined ? undefined : options[labels.indexOf(picked)]?.optionId;
+}
+
+function readJson(file: string): Record<string, any> {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return {}; }
+}
+
+/** One runtime per pi process, shared by every extension instance (jiti reloads modules per session). */
+export function getRuntime(): Runtime {
+  const key = Symbol.for(`pi-agy-acp.runtime.${VERSION}`);
+  const g = globalThis as any;
+  if (!g[key]) {
+    const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi/agent");
+    const home = process.env.PI_AGY_ACP_HOME ?? path.join(agentDir, "pi-agy-acp");
+    g[key] = new Runtime(home);
+  }
+  return g[key];
+}

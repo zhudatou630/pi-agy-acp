@@ -1,0 +1,8 @@
+[
+ {"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"pi-agy-acp-probe","version":"0.0.0"}}},
+ {"method":"session/new","params":{"cwd":"/tmp/agy-probe/ws","mcpServers":[]}},
+ {"method":"session/set_config_option","params":{"sessionId":"$SID","configId":"model","value":"gemini-3.8-flash"}},
+ {"method":"session/set_config_option","params":{"sessionId":"$SID","configId":"thought_level","value":"low"}},
+ {"method":"session/prompt","timeout":240000,"params":{"sessionId":"$SID","prompt":[{"type":"text","text":"Do these steps: 1) create a file hello.txt containing the single line 'hi'; 2) edit hello.txt to change 'hi' to 'hello world'; 3) run the shell command `ls -la` in the workspace; 4) reply with one short sentence summarizing. Keep it brief."}]}},
+ {"sleep":2000}
+]

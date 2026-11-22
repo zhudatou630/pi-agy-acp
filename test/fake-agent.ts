@@ -1,0 +1,248 @@
+// Scriptable fake of `agy acp` 1.5.14 (shapes taken from docs/research/agy-acp-handshake.md).
+// Env: FAKE_LOG (NDJSON of inbound frames), FAKE_STATE (persisted session ids, survives restarts),
+//      FAKE_AUTH=0 (every session call returns -32000).
+// Prompt text containing SCRIPT:<name> selects a script; anything else is echoed.
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import readline from "node:readline";
+
+const LOG = process.env.FAKE_LOG;
+const STATE = process.env.FAKE_STATE;
+const AUTH_FLAG = STATE ? `${STATE}.authed` : undefined;
+const AUTHED = process.env.FAKE_AUTH !== "0" || (!!AUTH_FLAG && fs.existsSync(AUTH_FLAG));
+const args = process.argv.slice(2);
+
+if (args.includes("--login")) {
+  process.stdout.write("Open this link in a browser to log in with Google:\n\n  https://accounts.google.com/o/oauth2/auth?client_id=fake&state=x\n\nThen paste the authorization code, or the full URL of the page you land on, and press Enter:\n");
+  readline.createInterface({ input: process.stdin }).once("line", (line) => {
+    if (LOG) fs.appendFileSync(LOG, JSON.stringify({ login: line }) + "\n");
+    const ok = line.trim() === "good-code";
+    if (ok && AUTH_FLAG) fs.writeFileSync(AUTH_FLAG, "1");
+    process.exit(ok ? 0 : 1);
+  });
+} else {
+  serve();
+}
+
+const MODELS: Record<string, string[]> = {
+  "gemini-4-neon": ["low", "medium", "high", "xhigh"],
+  "gemini-3.8-flash": ["low", "medium", "high"],
+  "gpt-oss-120b-medium": [],
+};
+
+function serve() {
+  const sessions = new Map<string, { model: string; level: string; mode: string }>();
+  const known = new Set<string>(STATE && fs.existsSync(STATE) ? JSON.parse(fs.readFileSync(STATE, "utf8")) : []);
+  let counter = 0;
+  let reqId = 0;
+  const waiting = new Map<string | number, (v: any) => void>();
+  const running = new Map<string, { promptId: number | string; cancelled: boolean; steers: string[] }>();
+
+  const send = (m: any) => process.stdout.write(JSON.stringify(m) + "\n");
+  const update = (sessionId: string, u: any) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: u } });
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const persist = () => { if (STATE) fs.writeFileSync(STATE, JSON.stringify([...known])); };
+  const ask = (method: string, params: any) => new Promise<any>((resolve) => {
+    const id = String(++reqId);
+    waiting.set(id, resolve);
+    send({ jsonrpc: "2.0", id, method, params });
+  });
+
+  const configOptions = (s: { model: string; level: string; mode: string }) => {
+    const levels = MODELS[s.model] ?? [];
+    return [
+      { id: "model", name: "Model", category: "model", type: "select", currentValue: s.model, options: Object.keys(MODELS).map((value) => ({ value, name: value })) },
+      ...(levels.length ? [{ id: "thought_level", name: "Thinking Level", category: "thought_level", type: "select", currentValue: s.level, options: levels.map((value) => ({ value, name: value })) }] : []),
+      { id: "mode", name: "Mode", category: "mode", type: "select", currentValue: s.mode, options: ["default", "accept-edits", "auto", "plan"].map((value) => ({ value, name: value })) },
+    ];
+  };
+  const setup = (id: string) => {
+    const s = { model: "gemini-4-neon", level: "high", mode: "default" }; // agy resets config on resume
+    sessions.set(id, s);
+    setTimeout(() => update(id, { sessionUpdate: "available_commands_update", availableCommands: [{ name: "goal", description: "Run until the goal is done." }, { name: "compact", description: "Compact now." }] }), 5);
+    return { sessionId: id, configOptions: configOptions(s), _meta: { antigravity: { tier: { name: "Fake Tier" } } } };
+  };
+
+  async function runPrompt(id: number | string, sessionId: string, text: string) {
+    const prev = running.get(sessionId);
+    if (prev) {
+      // native steer: the earlier prompt returns at once, the running script continues for the new one
+      prev.steers.push(text);
+      send({ jsonrpc: "2.0", id: prev.promptId, result: { stopReason: "end_turn" } });
+      prev.promptId = id;
+      return;
+    }
+    const run = { promptId: id, cancelled: false, steers: [] as string[] };
+    running.set(sessionId, run);
+    const u = (x: any) => update(sessionId, x);
+    const finish = (stopReason: string) => {
+      running.delete(sessionId);
+      u({ sessionUpdate: "usage_update", used: 1234, size: 1048576 });
+      send({ jsonrpc: "2.0", id: run.promptId, result: { stopReason, usage: { inputTokens: 900, outputTokens: 34, totalTokens: 99999 } } });
+    };
+    const script = /SCRIPT:(\w+)/.exec(text)?.[1];
+    const cwd = "/tmp/fake-ws";
+    switch (script) {
+      case "text":
+        u({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking about it" } });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello " } });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "world" } });
+        return finish("end_turn");
+      case "tools": {
+        u({ sessionUpdate: "tool_call", toolCallId: "call_w", name: "write_file", kind: "edit", title: "File a.txt", status: "in_progress", locations: [{ path: `${cwd}/a.txt` }], rawInput: { Path: `${cwd}/a.txt`, Content: "hi\n" } });
+        await sleep(20);
+        u({ sessionUpdate: "tool_call_update", toolCallId: "call_w", status: "completed", kind: "edit", title: "File a.txt", content: [{ type: "diff", path: `${cwd}/a.txt`, newText: "hi\n" }] });
+        await sleep(300);
+        u({ sessionUpdate: "tool_call", toolCallId: "call_e", name: "edit_file", kind: "edit", title: "File a.txt", status: "in_progress", locations: [{ path: `${cwd}/a.txt` }], rawInput: { Path: `${cwd}/a.txt`, Target: "hi", Replacement: "hello" } });
+        u({ sessionUpdate: "tool_call_update", toolCallId: "call_e", status: "completed", kind: "edit", content: [{ type: "diff", path: `${cwd}/a.txt`, oldText: "hi\n", newText: "hello\n" }] });
+        await sleep(300);
+        const cmd = { toolCallId: "call_x", name: "run_command", kind: "execute", title: "ls -la", rawInput: { CommandLine: "ls -la" } };
+        u({ sessionUpdate: "tool_call", ...cmd, status: "in_progress" });
+        u({ sessionUpdate: "tool_call_update", ...cmd, status: "pending" });
+        const res = await ask("session/request_permission", { sessionId, toolCall: { sessionUpdate: "tool_call", ...cmd, status: "pending" }, options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }] });
+        const allowed = res?.outcome?.optionId === "allow";
+        u({ sessionUpdate: "tool_call_update", ...cmd, status: allowed ? "completed" : "failed", rawOutput: { output: "Created At: x\nCompleted At: y\nCommand exited with code 0.\n\nCommand output:\ntotal 0\r\n", exit_code: allowed ? 0 : 1 }, content: [{ type: "content", content: { type: "text", text: allowed ? "Created At: x\nCompleted At: y\nCommand exited with code 0.\n\nCommand output:\ntotal 0\r\n" : "denied" } }] });
+        await sleep(20);
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: allowed ? "All done." : "Command was denied." } });
+        return finish("end_turn");
+      }
+      case "parallel":
+        u({ sessionUpdate: "tool_call", toolCallId: "p1", kind: "read", title: "Read x", status: "in_progress", locations: [{ path: "/tmp/x" }] });
+        u({ sessionUpdate: "tool_call", toolCallId: "p2", kind: "read", title: "Read y", status: "in_progress", locations: [{ path: "/tmp/y" }] });
+        await sleep(400);
+        u({ sessionUpdate: "tool_call_update", toolCallId: "p2", status: "completed", content: [{ type: "content", content: { type: "text", text: "Y" } }] });
+        u({ sessionUpdate: "tool_call_update", toolCallId: "p1", status: "completed", content: [{ type: "content", content: { type: "text", text: "X" } }] });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "read both" } });
+        return finish("end_turn");
+      case "slow":
+        for (let i = 0; i < 30 && !run.cancelled; i++) {
+          u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `chunk${i} ` } });
+          await sleep(100);
+          if (run.steers.length) {
+            u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `steer-received:${run.steers.splice(0).join("|")} ` } });
+            await sleep(100);
+            break;
+          }
+        }
+        return finish(run.cancelled ? "cancelled" : "end_turn");
+      case "longtool": {
+        u({ sessionUpdate: "tool_call", toolCallId: "lt", kind: "execute", title: "sleep 30", status: "in_progress", rawInput: { CommandLine: "sleep 30" } });
+        for (let i = 0; i < 100 && !run.cancelled && !run.steers.length; i++) await sleep(50);
+        if (run.cancelled) {
+          u({ sessionUpdate: "tool_call_update", toolCallId: "lt", status: "failed", rawOutput: { output: "" }, content: [{ type: "content", content: { type: "text", text: "" } }] });
+          return finish("cancelled");
+        }
+        u({ sessionUpdate: "tool_call_update", toolCallId: "lt", status: "completed", rawOutput: { output: "done", exit_code: 0 } });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: run.steers.length ? `steer-received:${run.steers.join("|")}` : "finished" } });
+        return finish("end_turn");
+      }
+      case "background":
+        u({ sessionUpdate: "tool_call", toolCallId: "bg", kind: "execute", title: "sleep 1 && echo ok", status: "in_progress", rawInput: { CommandLine: "sleep 1 && echo ok" } });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "started in background" } });
+        finish("end_turn");
+        await sleep(300);
+        u({ sessionUpdate: "tool_call_update", toolCallId: "bg", status: "completed", rawOutput: { output: "ok", exit_code: 0 } });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "background job printed ok" } });
+        return;
+      case "question": {
+        const res = await ask("session/request_permission", { sessionId, toolCall: { toolCallId: "interaction_1", title: "Pick a color" }, options: [{ optionId: "r", name: "Red", kind: "allow_once" }, { optionId: "b", name: "Blue", kind: "allow_once" }] });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `picked:${res?.outcome?.optionId ?? res?.outcome?.outcome}` } });
+        return finish("end_turn");
+      }
+      case "plan":
+        u({ sessionUpdate: "plan", entries: [{ content: "step one", status: "completed" }, { content: "step two", status: "in_progress" }] });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "planned" } });
+        return finish("end_turn");
+      case "crash":
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "about to crash" } });
+        await sleep(50);
+        process.exit(3);
+      case "grandchild": {
+        const child = spawn("sleep", ["600"], { stdio: "ignore" });
+        if (LOG) fs.appendFileSync(LOG, JSON.stringify({ grandchild: child.pid }) + "\n");
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `spawned ${child.pid}` } });
+        return finish("end_turn");
+      }
+      case "fail429":
+        running.delete(sessionId);
+        return send({ jsonrpc: "2.0", id: run.promptId, error: { code: -32603, message: "429 Too Many Requests" } });
+      case "maxtokens":
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "partial" } });
+        return finish("max_tokens");
+      case "quiet":
+        // nothing streamed yet when a steer arrives
+        for (let i = 0; i < 20 && !run.steers.length; i++) await sleep(50);
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: run.steers.length ? `steer-received:${run.steers.join("|")}` : "no steer" } });
+        return finish("end_turn");
+      case "title":
+        u({ sessionUpdate: "session_info_update", title: "Fake Title" });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "titled" } });
+        return finish("end_turn");
+      default: {
+        const s = sessions.get(sessionId)!;
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `echo[${s.model}/${s.level}/${s.mode}]: ${text}` } });
+        return finish("end_turn");
+      }
+    }
+  }
+
+  const rl = readline.createInterface({ input: process.stdin });
+  rl.on("line", (line) => {
+    if (!line.trim()) return;
+    const msg = JSON.parse(line);
+    if (LOG) fs.appendFileSync(LOG, JSON.stringify(msg) + "\n");
+    if (!msg.method) {
+      waiting.get(msg.id)?.(msg.result);
+      waiting.delete(msg.id);
+      return;
+    }
+    const reply = (result: any) => send({ jsonrpc: "2.0", id: msg.id, result });
+    const fail = (code: number, message: string) => send({ jsonrpc: "2.0", id: msg.id, error: { code, message } });
+    const p = msg.params ?? {};
+    const needAuth = !AUTHED && msg.method.startsWith("session/");
+    if (needAuth && msg.id !== undefined) return fail(-32000, "Authentication required");
+    switch (msg.method) {
+      case "initialize":
+        return reply({ protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: true, audio: false, embeddedContext: true }, sessionCapabilities: { resume: {}, close: {}, list: {} } }, agentInfo: { name: "Antigravity ACP Server", version: "1.5.14-fake" }, authMethods: [{ id: "oauth-personal", name: "Log in with Google" }] });
+      case "session/new": {
+        const id = `fake-${process.pid}-${++counter}`;
+        known.add(id);
+        persist();
+        return reply(setup(id));
+      }
+      case "session/list":
+        return reply({ sessions: [...known].map((sessionId) => ({ sessionId, cwd: "/tmp", title: "t" })) });
+      case "session/resume":
+        if (!known.has(p.sessionId)) return reply(setup(p.sessionId)); // like agy: unknown ids "succeed"
+        return reply(setup(p.sessionId));
+      case "session/close":
+        sessions.delete(p.sessionId);
+        return reply({});
+      case "session/set_config_option": {
+        const s = sessions.get(p.sessionId);
+        if (!s) return fail(-32602, "unknown session");
+        if (p.configId === "model") {
+          if (!(p.value in MODELS)) return fail(-32602, `unknown model ${p.value}`);
+          s.model = p.value;
+          const levels = MODELS[s.model];
+          if (!levels.includes(s.level)) s.level = levels.includes("medium") ? "medium" : levels[0] ?? "";
+        } else if (p.configId === "thought_level") s.level = p.value;
+        else if (p.configId === "mode") s.mode = p.value;
+        return reply({ configOptions: configOptions(s) });
+      }
+      case "session/prompt": {
+        const text = (p.prompt ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+        void runPrompt(msg.id, p.sessionId, text);
+        return;
+      }
+      case "session/cancel": {
+        const run = running.get(p.sessionId);
+        if (run) run.cancelled = true;
+        return;
+      }
+      default:
+        if (msg.id !== undefined) fail(-32601, `Method not found: ${msg.method}`);
+    }
+  });
+  rl.on("close", () => process.exit(0));
+}

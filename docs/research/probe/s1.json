@@ -1,0 +1,6 @@
+[
+ {"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"pi-agy-acp-probe","version":"0.0.0"}}},
+ {"method":"session/new","params":{"cwd":"/tmp/agy-probe/ws","mcpServers":[]}},
+ {"method":"session/list","params":{"cwd":"/tmp/agy-probe/ws"}},
+ {"sleep":3000}
+]

@@ -1,0 +1,9 @@
+[
+ {"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"pi-agy-acp-probe","version":"0.0.0"}}},
+ {"method":"session/resume","params":{"sessionId":"<existing-session-id>","cwd":"/tmp/agy-probe/ws","mcpServers":[]}},
+ {"method":"session/load","params":{"sessionId":"00000000-0000-4000-8000-000000000000","cwd":"/tmp/agy-probe/ws","mcpServers":[]}},
+ {"method":"session/load","params":{"sessionId":"<existing-session-id>","cwd":"/tmp","mcpServers":[]}},
+ {"method":"session/fork","params":{"sessionId":"<existing-session-id>","cwd":"/tmp/agy-probe/ws","mcpServers":[]}},
+ {"method":"session/set_model","params":{"sessionId":"<existing-session-id>","modelId":"gemini-3.8-flash-low"}},
+ {"sleep":500}
+]

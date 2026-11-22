@@ -1,0 +1,16 @@
+[
+ {"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"pi-agy-acp-probe","version":"0.0.0"}}},
+ {"method":"session/new","params":{"cwd":"/tmp/agy-probe/ws","mcpServers":[]}},
+ {"method":"session/set_config_option","params":{"sessionId":"$SID","configId":"model","value":"gemini-3.8-flash"}},
+ {"method":"session/set_config_option","params":{"sessionId":"$SID","configId":"thought_level","value":"low"}},
+ {"method":"session/set_config_option","params":{"sessionId":"$SID","configId":"mode","value":"auto"}},
+ {"method":"session/prompt","noWait":true,"timeout":120000,"params":{"sessionId":"$SID","prompt":[{"type":"text","text":"Run the shell command `sleep 25 && echo slept` and then tell me its output."}]}},
+ {"sleep":9000},
+ {"method":"session/prompt","noWait":true,"timeout":120000,"params":{"sessionId":"$SID","prompt":[{"type":"text","text":"STEER: also include the word banana in your final answer."}]}},
+ {"sleep":4000},
+ {"method":"session/cancel","notify":true,"params":{"sessionId":"$SID"}},
+ {"sleep":6000},
+ {"method":"session/prompt","timeout":120000,"params":{"sessionId":"$SID","prompt":[{"type":"text","text":"Just reply OK2."}]}},
+ {"method":"session/close","params":{"sessionId":"$SID"}},
+ {"sleep":500}
+]
