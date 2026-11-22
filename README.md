@@ -74,3 +74,7 @@ npm run smoke       # 连真实 agy 的冒烟测试（gemini-3.8-flash、low，�
 ```
 
 设计见 [docs/design.md](docs/design.md)，调研见 [docs/research/](docs/research/README.md)，评审记录见 [docs/review-2026-11-22.md](docs/review-2026-11-22.md)。
+
+## 许可证
+
+[MIT](LICENSE)

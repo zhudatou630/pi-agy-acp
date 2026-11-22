@@ -2,6 +2,7 @@
   "name": "pi-agy-acp",
   "version": "0.1.0",
   "description": "Antigravity CLI (agy acp) as a pi provider, tuned for pi-web",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/zhudatou630/pi-agy-acp.git"
