@@ -35,7 +35,7 @@
 
 也可以先 `git clone` 到本地，再把 `packages` 里那一项写成本地绝对路径。
 
-然后重启 pi-web（或者在 pi 里执行 `/reload`），在模型选择器里选 `Gemini 4 Neon (Antigravity)` 等模型。思考档位用 pi 自带的 thinking level，模型不支持的档位会显示为不可选。
+然后重启 pi-web（或者在 pi 里执行 `/reload`），在模型选择器的 antigravity 分组里选 `Gemini 4 Neon` 等模型。思考档位用 pi 自带的 thinking level，模型不支持的档位会显示为不可选。
 
 如果 agy 没有登录，在 pi 里执行 `/agy login`（走的是官方的 `agy acp --login` 流程），或者在终端里运行 `agy` 登录。
 

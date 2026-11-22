@@ -30,6 +30,7 @@ test("pi model defs: levels agy lacks are null, models without levels are not re
   const oss = models.find((m) => m.id === "gpt-oss-120b-medium")!;
   assert.equal(oss.reasoning, false);
   assert.equal(oss.provider, "antigravity");
+  assert.equal(neon.name, "Gemini 4 Neon", "display name is agy's own; the picker groups by provider");
 });
 
 test("unified diff of snippets keeps shared lines as context", () => {

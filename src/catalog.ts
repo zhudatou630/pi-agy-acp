@@ -66,7 +66,7 @@ export function toPiModels(catalog: Catalog) {
     for (const level of PI_LEVELS) thinkingLevelMap[level] = m.levels.includes(level) ? level : null;
     return {
       id: m.id,
-      name: `${m.name} (Antigravity)`,
+      name: m.name,
       api: API_ID,
       provider: PROVIDER_ID,
       baseUrl: "acp://agy",
