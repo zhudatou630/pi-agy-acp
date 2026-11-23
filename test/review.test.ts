@@ -89,6 +89,33 @@ test("a prompt agy never answers after Stop does not keep agy from idle shutdown
   assert.match(lastText(session), /echo\[.*\]: after hang/, "the broken session is replaced and works");
 });
 
+test("a background command whose final status never comes stops holding the reply after long silence", async () => {
+  const { session } = await createSession(env);
+  const run = session.prompt("SCRIPT:bgstuck");
+  const rt = runtime();
+  let s: any;
+  await until(() => !!(s = [...rt.sessions.values()].find((x: any) => x.turn?.awaitingWake && x.tools.has("bgx"))), 5000);
+  const turn = s.turn;
+  assert.equal(rt.watchdog(s, turn), true, "recent activity: keep holding");
+  turn.lastActivity = Date.now() - 31 * 60_000;
+  assert.equal(rt.watchdog(s, turn), false);
+  await run;
+  await until(() => !session.isStreaming, 5000);
+  const result = session.messages.find((m: any) => m.role === "toolResult" && m.toolCallId === "bgx");
+  assert.match(result.content[0].text, /Still running in the background/);
+  assert.equal(assistants(session).at(-1).stopReason, "stop");
+  assert.equal(rt.busy(), false);
+  assert.ok(!env.frames().some((f) => f.method === "session/cancel" && f.params.sessionId === s.id), "the command is not cancelled");
+});
+
+test("a frame split across many stdout chunks arrives whole", async () => {
+  const { session } = await createSession(env);
+  await session.prompt("SCRIPT:bigframe");
+  const text = lastText(session);
+  assert.equal(text.length, 3_000_003);
+  assert.ok(text.endsWith("END"));
+});
+
 test("agy max_tokens maps to pi length", async () => {
   const { session } = await createSession(env);
   await session.prompt("SCRIPT:maxtokens");

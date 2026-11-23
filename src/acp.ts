@@ -141,6 +141,8 @@ export class AcpProcess {
   }
 
   private onStdout(chunk: string): void {
+    // a frame spanning many chunks: look for its end only in the new data
+    if (!chunk.includes("\n")) { this.buf += chunk; return; }
     this.buf += chunk;
     let i: number;
     while ((i = this.buf.indexOf("\n")) >= 0) {

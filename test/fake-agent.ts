@@ -267,6 +267,14 @@ function serve() {
         u({ sessionUpdate: "plan", entries: [{ content: "step one", status: "completed" }, { content: "step two", status: "in_progress" }] });
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "planned" } });
         return finish("end_turn");
+      case "bgstuck":
+        // agy drops the background command's final status: it never completes
+        u({ sessionUpdate: "tool_call", toolCallId: "bgx", kind: "execute", title: "make", status: "in_progress", rawInput: { CommandLine: "make", IsDaemon: false } });
+        return finish("end_turn");
+      case "bigframe":
+        // one frame far larger than a pipe read, split across many stdout chunks
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "x".repeat(3_000_000) + "END" } });
+        return finish("end_turn");
       case "hang":
         // a stuck agy: ignores session/cancel and never answers this prompt
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "stuck " } });

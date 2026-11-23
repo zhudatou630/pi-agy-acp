@@ -28,6 +28,8 @@ const WAKE_GRACE_MS = 20_000;
 const WAKE_SETTLE_MS = 2_000;
 /** Fallback when agy goes quiet without a closing usage_update. It can generate silently for minutes. */
 const WAKE_QUIET_MS = 120_000;
+/** agy can drop a background command's final status: stop holding the reply after this much silence. */
+const HOLD_SILENT_MS = 30 * 60_000;
 
 export class AuthRequiredError extends Error {
   constructor() {
@@ -535,18 +537,27 @@ export class Runtime {
   }
 
   private armWatchdog(s: AcpSession, turn: Turn): void {
-    const tick = () => {
-      if (turn.ended) return;
-      const busy = turn.pendingPermissions > 0 || [...s.tools.values()].some((t) => !isTerminal(t));
-      if (!busy && Date.now() - turn.lastActivity > WATCHDOG_MS) {
-        this.cancel(s);
-        this.endTurnNow(s, new Error(`agy produced no output for ${WATCHDOG_MS / 60000} minutes; cancelled this turn`));
-        s.broken = true;
-        return;
-      }
-      setTimeout(tick, 30_000).unref();
-    };
+    const tick = () => { if (this.watchdog(s, turn)) setTimeout(tick, 30_000).unref(); };
     setTimeout(tick, 30_000).unref();
+  }
+
+  /** One watchdog check; false once the turn is over. */
+  watchdog(s: AcpSession, turn: Turn): boolean {
+    if (turn.ended) return false;
+    const silent = Date.now() - turn.lastActivity;
+    if (turn.awaitingWake && turn.pendingPermissions === 0 && silent > HOLD_SILENT_MS) {
+      // no cancel: the command may still be running, and agy's later report opens a new reply
+      this.finishTurn(s, turn, { result: turn.endResult });
+      return false;
+    }
+    const busy = turn.pendingPermissions > 0 || [...s.tools.values()].some((t) => !isTerminal(t));
+    if (!busy && silent > WATCHDOG_MS) {
+      this.cancel(s);
+      this.endTurnNow(s, new Error(`agy produced no output for ${WATCHDOG_MS / 60000} minutes; cancelled this turn`));
+      s.broken = true;
+      return false;
+    }
+    return true;
   }
 
   // -- inbound ---------------------------------------------------------------

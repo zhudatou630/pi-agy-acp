@@ -84,6 +84,7 @@ export function mirrorCall(s: ToolState): { name: string; args: Record<string, a
 // agy prefixes command output with timing/exit lines (background commands omit the timing)
 const COMMAND_PREAMBLE = /^(?:Created At:[^\n]*\n)?(?:Completed At:[^\n]*\n)?(?:Command exited with code -?\d+\.?\n)?\n?(?:Command output:\n)?/;
 const MAX_RESULT = 20_000;
+const LOCATE_MAX_BYTES = 1024 * 1024;
 
 function textOf(s: ToolState): string {
   const parts: string[] = [];
@@ -143,8 +144,10 @@ export function patchFor(s: ToolState): { patch: string; located: boolean } | un
   if (d.oldText) {
     try {
       // only trust a unique, non-empty match; otherwise show the snippet without line numbers
-      const current = fs.readFileSync(d.path, "utf8");
-      const at = d.newText ? current.indexOf(d.newText) : -1;
+      // a big file is not read on pi's event loop just for line numbers
+      const st = fs.statSync(d.path);
+      const current = st.isFile() && st.size <= LOCATE_MAX_BYTES ? fs.readFileSync(d.path, "utf8") : "";
+      const at = d.newText && current ? current.indexOf(d.newText) : -1;
       if (at >= 0 && current.indexOf(d.newText, at + 1) < 0) { start = current.slice(0, at).split("\n").length; located = true; }
     } catch {}
   } else {

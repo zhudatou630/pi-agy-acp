@@ -58,6 +58,11 @@ test("edit diff: unique snippet gets real line numbers, ambiguous or empty does 
   assert.equal(mirrorResult(dup).details.agy.lineNumbersUnknown, true);
   const del = mergeToolUpdate(undefined, { toolCallId: "r", kind: "edit", status: "completed", content: [{ type: "diff", path: file, oldText: "x\n", newText: "" }] });
   assert.equal(mirrorResult(del).details.agy.lineNumbersUnknown, true);
+  // over 1 MiB: not read for line numbers, the snippet diff still shows
+  fs.writeFileSync(file, "y".repeat(1024 * 1024) + "\nunique line\n");
+  const big = mirrorResult(mergeToolUpdate(undefined, { toolCallId: "b", kind: "edit", status: "completed", content: [{ type: "diff", path: file, oldText: "old\n", newText: "unique line\n" }] }));
+  assert.equal(big.details.agy.lineNumbersUnknown, true);
+  assert.match(big.details.patch, /-old\n\+unique line\n/);
 });
 
 test("real agy 1.5.14 tool shapes map to pi-web friendly mirrors", () => {
