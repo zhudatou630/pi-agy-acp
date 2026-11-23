@@ -297,7 +297,7 @@ sequenceDiagram
   - `totalTokens` = 最后一次 `usage_update.used`，即上下文占用；
   - `cost` = `calculateCost(model, usage)`，价格取模型定义（含用户的 `modelOverrides`）。
 - 因此 `totalTokens` 不等于各项之和。pi 的上下文估算优先读 `totalTokens`，所以不能把累计值写进去，否则会污染上下文估算（Zac #80 的教训）。pi-web 的用量面板按各项求和，上下文条读 `totalTokens`，两者各自正确。
-- 没有 `usage_update` 的 turn（如 agy 自己的 `/compact`）不记用量：只有计费值时，pi 会把各项之和当成上下文占用。被 steer 接管的 prompt 没有 usage，这部分会少算。
+- 没有 `usage_update` 的 turn（如 agy 自己的 `/compact`）不记用量：只有计费值时，pi 会把各项之和当成上下文占用。以下情况只会少算、不会多算，属于已接受的限制：被 steer 接管的 prompt 没有 usage；agy 已结束但 pi 带着新输入另开 turn、或在后台等待期间 steer/停止时，前一个 prompt 的 usage 会被丢弃；回合中途在 pi 切换模型时，续接消息按新模型记名和计价；分档价格按整轮累计量选档（拿不到逐次调用的数）。
 
 ## 4. 发给 agy 的内容（干净性约定）
 
