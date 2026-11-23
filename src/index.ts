@@ -7,7 +7,6 @@ import { type Binding, type BindingFile, inputHash } from "./bindings.ts";
 import { PROVIDER_ID, toPiModels } from "./catalog.ts";
 import { MIRROR_TOOLS, mirrorResult } from "./mirror.ts";
 import { createStreamSimple, type Instance } from "./provider.ts";
-import { WAKE_MARKER } from "./replay.ts";
 import { type AcpSession, getRuntime, type Runtime } from "./runtime.ts";
 
 const MIRROR_LABELS: Record<string, string> = {
@@ -33,16 +32,28 @@ export default function piAgyAcp(pi: ExtensionAPI) {
     onTitle: (title) => {
       try { if (!pi.getSessionName()) pi.setSessionName(title); } catch {}
     },
-    onWake: () => {
-      // pi has no reply open for this session: start one so agy's own report shows up now
-      if (!isOurModel() || !ctx?.isIdle?.()) return;
-      pi.sendMessage({ customType: "agy-wake", content: WAKE_MARKER, display: true }, { triggerTurn: true });
+    onWake: () => wake(),
+    attach: (s, f, b) => {
+      // another branch's ACP session no longer reports into this pi session
+      if (session && session !== s && session.owner === inst) session.owner = undefined;
+      session = s; file = f; binding = b;
     },
-    attach: (s, f, b) => { session = s; file = f; binding = b; },
     session: () => session,
   };
 
   const isOurModel = () => ctx?.model?.provider === PROVIDER_ID;
+
+  // agy talks on its own (a background job finished) and no pi reply is open: start one so the
+  // report shows up now. Busy (finishing a reply, compacting): queue it, or retry shortly.
+  const wake = (attempt = 0): void => {
+    if (!isOurModel() || attempt > 30) return;
+    try {
+      pi.sendMessage({ customType: "agy-wake", content: "[agy] Background task update", display: true },
+        ctx?.isIdle?.() ? { triggerTurn: true } : { triggerTurn: true, deliverAs: "followUp" });
+    } catch {
+      setTimeout(() => wake(attempt + 1), 2000).unref();
+    }
+  };
 
   // -- provider ---------------------------------------------------------------
   const streamSimple = createStreamSimple(inst);
@@ -127,6 +138,11 @@ export default function piAgyAcp(pi: ExtensionAPI) {
     });
     return { action: "continue" };
   });
+
+  // The wake message only opens a reply in pi; no model (agy included) should see it.
+  pi.on("context", (event: any) => ({
+    messages: event.messages.filter((m: any) => !(m.role === "custom" && m.customType === "agy-wake")),
+  }));
 
   // live sessions follow catalog changes; services-only loads (pi-web's model list) never subscribe
   const onCatalog = () => registerProvider();

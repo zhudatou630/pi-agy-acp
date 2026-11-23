@@ -88,3 +88,49 @@ test("after /reload (module re-evaluated, runtime kept) tool turns still work", 
   await session.prompt("SCRIPT:parallel");
   assert.equal(lastText(session), "read both");
 });
+
+// --- background / wake (review of c054a70) ---
+
+test("after Stop, late agy output opens no reply and late permission requests are refused", async () => {
+  const { session } = await createSession(env);
+  const run = session.prompt("SCRIPT:stoplate");
+  await sleep(300);
+  await session.abort();
+  await run;
+  await until(() => env.frames().some((f) => f.lateOutcome), 5000);
+  assert.equal(env.frames().find((f) => f.lateOutcome).lateOutcome, "deny");
+  await sleep(500);
+  assert.ok(!session.messages.some((m: any) => m.role === "custom" && m.customType === "agy-wake"));
+});
+
+test("a daemon started during agy's own report does not hold that reply open", async () => {
+  const { session } = await createSession(env);
+  await session.prompt("SCRIPT:wakedaemon");
+  await until(() => session.messages.some((m: any) => m.role === "custom" && m.customType === "agy-wake"), 5000);
+  await until(() => !session.isStreaming && session.messages.some((m: any) => m.role === "toolResult" && m.toolCallId === "wd2"), 10000);
+  const card = session.messages.find((m: any) => m.role === "toolResult" && m.toolCallId === "wd2");
+  assert.match(card.content[0].text, /Still running in the background/);
+});
+
+test("a question during agy's own report waits for the user instead of ending on silence", async () => {
+  const { session, mock } = await createSession(env);
+  mock.answers.select = (async (options: string[]) => { await sleep(4000); return options.find((o) => o === "Blue"); }) as any;
+  await session.prompt("SCRIPT:wakequestion");
+  await until(() => !session.isStreaming && session.messages.some((m: any) => m.role === "assistant" && JSON.stringify(m.content).includes("picked:b")), 15000);
+  // the answer belongs to the same reply: the question did not end it on silence
+  assert.equal(session.messages.filter((m: any) => m.role === "custom" && m.customType === "agy-wake").length, 1);
+});
+
+test("a normal command whose title mentions 'schedule' still holds the reply", async () => {
+  const { session } = await createSession(env);
+  await session.prompt("SCRIPT:schedtitle");
+  const card = session.messages.find((m: any) => m.role === "toolResult" && m.toolCallId === "st");
+  assert.equal(card.content[0].text, "3 passed");
+  assert.match(lastText(session), /tests pass/);
+});
+
+test("a user who literally types the wake text still reaches agy", async () => {
+  const { session } = await createSession(env);
+  await session.prompt("[agy] Background task update");
+  assert.match(lastText(session), /\[agy\] Background task update$/);
+});

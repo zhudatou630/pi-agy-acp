@@ -114,7 +114,8 @@ export function mirrorResult(s: ToolState): MirrorResult {
   let text = textOf(s);
   let isError = s.status === "failed";
   if (s.kind === "execute") {
-    text = text.replace(COMMAND_PREAMBLE, "").replace(/\r\n/g, "\n");
+    if (/^(Created At:|Command exited with code)/.test(text)) text = text.replace(COMMAND_PREAMBLE, "");
+    text = text.replace(/\r\n/g, "\n");
     const exit = s.rawOutput?.exit_code ?? s.rawOutput?.exitCode;
     if (typeof exit === "number") {
       details.agy.exitCode = exit;

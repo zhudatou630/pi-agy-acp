@@ -73,6 +73,7 @@ function serve() {
       prev.promptId = id;
       return;
     }
+    cancelledSessions.delete(sessionId);
     const run = { promptId: id, cancelled: false, steers: [] as string[] };
     running.set(sessionId, run);
     const u = (x: any) => update(sessionId, x);
@@ -163,6 +164,42 @@ function serve() {
             return;
           }
         }
+        return;
+      }
+      case "stoplate": {
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "working " } });
+        for (let i = 0; i < 100 && !run.cancelled; i++) await sleep(50);
+        finish("cancelled");
+        await sleep(200);
+        // agy keeps going briefly after Stop: neither may open a reply or get permission
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "late chunk" } });
+        const late = await ask("session/request_permission", { sessionId, toolCall: { toolCallId: "late", kind: "execute", title: "rm -rf build", rawInput: { CommandLine: "rm -rf build" } }, options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }] });
+        if (LOG) fs.appendFileSync(LOG, JSON.stringify({ lateOutcome: late?.outcome?.optionId ?? late?.outcome?.outcome }) + "\n");
+        return;
+      }
+      case "wakedaemon":
+        u({ sessionUpdate: "tool_call", toolCallId: "wd1", kind: "execute", title: "npm run dev", status: "in_progress", rawInput: { CommandLine: "npm run dev", IsDaemon: true } });
+        finish("end_turn");
+        await sleep(400);
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "restarting watcher " } });
+        u({ sessionUpdate: "tool_call", toolCallId: "wd2", kind: "execute", title: "npm run watch", status: "in_progress", rawInput: { CommandLine: "npm run watch", IsDaemon: true } });
+        return;
+      case "wakequestion": {
+        u({ sessionUpdate: "tool_call", toolCallId: "wq", kind: "execute", title: "npm run dev", status: "in_progress", rawInput: { CommandLine: "npm run dev", IsDaemon: true } });
+        finish("end_turn");
+        await sleep(400);
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "need input " } });
+        const res = await ask("session/request_permission", { sessionId, toolCall: { toolCallId: "interaction_9", title: "Pick a color" }, options: [{ optionId: "r", name: "Red", kind: "allow_once" }, { optionId: "b", name: "Blue", kind: "allow_once" }] });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `picked:${res?.outcome?.optionId ?? res?.outcome?.outcome}` } });
+        return;
+      }
+      case "schedtitle": {
+        const t = { toolCallId: "st", name: "run_command", kind: "execute", title: "pytest test_schedule.py", rawInput: { CommandLine: "pytest test_schedule.py", IsDaemon: false } };
+        u({ sessionUpdate: "tool_call", ...t, status: "in_progress" });
+        finish("end_turn");
+        await sleep(300);
+        u({ sessionUpdate: "tool_call_update", ...t, status: "completed", rawOutput: { output: "3 passed", exit_code: 0 } });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "tests pass" } });
         return;
       }
       case "daemon":

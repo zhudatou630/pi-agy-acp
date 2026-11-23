@@ -1,9 +1,6 @@
 // pi messages → ACP prompt content: user input blocks, other-model notes, bounded history transcript.
 import { inputHash } from "./bindings.ts";
 
-/** Content of the custom message that opens a pi reply when agy talks on its own; never sent to agy. */
-export const WAKE_MARKER = "[agy] Background task update";
-
 export type AcpBlock = { type: "text"; text: string } | { type: "image"; mimeType: string; data: string };
 
 const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
@@ -26,7 +23,6 @@ export function inputsToBlocks(inputs: any[], opts: { images: boolean; delivered
   const blocks: AcpBlock[] = [];
   for (const m of inputs) {
     if (m.role === "user") {
-      if (userText(m) === WAKE_MARKER) continue;
       const at = opts.delivered?.indexOf(inputHash(userText(m))) ?? -1;
       if (at >= 0) {
         opts.delivered!.splice(at, 1);
@@ -99,7 +95,6 @@ export function historyTranscript(history: any[], maxChars: number): string {
   let dropped = 0;
   for (let i = history.length - 1; i >= 0; i--) {
     const m = history[i];
-    if (m.role === "user" && userText(m) === WAKE_MARKER) continue;
     const body = transcriptOf(m, 8000);
     if (!body.trim()) continue;
     let line = `[${m.role === "toolResult" ? "tool" : m.role}] ${body}`;

@@ -8,7 +8,7 @@ import { type Catalog, loadCatalog, mapThinkingLevel, saveCatalog } from "./cata
 import { DebugLog } from "./debug.ts";
 import { isTerminal, mergeToolUpdate, type ToolState } from "./mirror.ts";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.2.1";
 
 /** ~/.pi/agent/pi-agy-acp/config.json */
 export interface RuntimeConfig {
@@ -63,6 +63,13 @@ export class AsyncQueue<T> {
 
   unshift(item: T): void {
     this.items.unshift(item);
+  }
+
+  /** Queue before a not-yet-consumed end (late output joins the reply it belongs to). */
+  insertBeforeEnd(item: T): void {
+    const at = this.items.findIndex((x: any) => x?.kind === "end");
+    if (at < 0) this.push(item);
+    else this.items.splice(at, 0, item);
   }
 
   /** Take whatever is queued right now. */
@@ -122,9 +129,15 @@ export class Turn {
   lastActivity = Date.now();
 }
 
-/** A command agy moved to the background that finishes on its own; daemons and schedules never do. */
+/** Daemons and timers: they may never finish, so nothing waits for them. */
+function runsForever(t: ToolState): boolean {
+  return (t.kind === "execute" && t.rawInput?.IsDaemon === true)
+    || t.name === "schedule" || t.title === "Run schedule" || t.title === "Running schedule";
+}
+
+/** A command agy moved to the background that finishes on its own. */
 function holdsTurn(t: ToolState): boolean {
-  return !isTerminal(t) && t.kind === "execute" && t.rawInput?.IsDaemon !== true && !/schedule/i.test(t.title ?? "");
+  return !isTerminal(t) && t.kind === "execute" && !runsForever(t);
 }
 
 /** What the runtime needs from the pi side of a session (one extension instance). */
@@ -146,6 +159,8 @@ export class AcpSession {
   turn: Turn | undefined;
   owner: SessionOwner | undefined;
   usage: { used?: number; size?: number } = {};
+  /** The user pressed Stop: nothing agy says or asks afterwards opens a reply, until the next prompt. */
+  stopped = false;
   /** Cancel never settled: do not reuse without close + resume. */
   broken = false;
   ephemeral = false;
@@ -205,10 +220,11 @@ export class AcpSession {
     });
   }
 
-  /** Forget finished, already-mirrored tools (called when a new turn starts). */
+  /** Forget finished, already-mirrored tools (called when a new turn starts). Background ones stay:
+   *  agy still reports on them, and their ids must keep mapping to the card already shown. */
   pruneTools(): void {
     for (const [id, s] of this.tools) {
-      if (isTerminal(s) && this.emitted.has(id)) {
+      if ((s.status === "completed" || s.status === "failed" || s.aborted) && this.emitted.has(id)) {
         this.tools.delete(id);
         this.emitted.delete(id);
         this.toolWaiters.delete(id);
@@ -430,7 +446,9 @@ export class Runtime {
     const n = ++turn.latestPrompt;
     turn.lastActivity = Date.now();
     turn.awaitingWake = false; // a prompt is in flight again (steer)
+    turn.woke = false;
     clearTimeout(turn.wakeTimer);
+    s.stopped = false;
     proc.request("session/prompt", { sessionId: s.id, prompt: blocks }).then(
       (result) => this.endTurn(s, turn, n, { result }),
       (error: Error) => this.endTurn(s, turn, n, { error: isAuthError(error) ? new AuthRequiredError() : error }),
@@ -440,7 +458,7 @@ export class Runtime {
 
   private endTurn(s: AcpSession, turn: Turn, n: number, item: { result?: any; error?: Error }): void {
     if (turn.latestPrompt !== n || turn.ended) return; // superseded by a steer
-    if (item.result && !turn.cancelled && [...s.tools.values()].some(holdsTurn)) {
+    if (!s.ephemeral && !turn.cancelled && item.result?.stopReason === "end_turn" && [...s.tools.values()].some(holdsTurn)) {
       // agy moved a command to the background and reports when it is done: keep the pi reply
       // open, like pi's own bash. Daemons and schedules do not hold it.
       turn.awaitingWake = true;
@@ -502,6 +520,7 @@ export class Runtime {
     const turn = s.activeTurn;
     if (!turn || turn.ended || turn.cancelled) return;
     turn.cancelled = true;
+    s.stopped = true;
     turn.abort.abort(); // dismiss permission dialogs
     this.proc?.notify("session/cancel", { sessionId: s.id });
     // no prompt in flight to return "cancelled": end it here (agy stops the background command)
@@ -533,8 +552,17 @@ export class Runtime {
     let turn = s.turn && !s.turn.ended ? s.turn : undefined;
     const speaks = ["agent_message_chunk", "agent_thought_chunk", "plan"].includes(u.sessionUpdate)
       || (u.sessionUpdate === "tool_call" && !s.tools.has(u.toolCallId));
-    // agy talking with no reply open (e.g. a background command finished): open one
-    if (!turn && speaks && !s.ephemeral && (!s.turn || s.turn.closed)) turn = this.startWake(s);
+    if (!turn && speaks && !s.ephemeral && !s.stopped) {
+      const prev = s.turn;
+      if (prev && !prev.closed) {
+        // pi has not finished the previous reply yet: let this join it, before its end
+        if (u.sessionUpdate === "tool_call") s.tools.set(u.toolCallId, mergeToolUpdate(undefined, u));
+        prev.queue.insertBeforeEnd({ kind: "update", update: u });
+        return;
+      }
+      // agy talking with no reply open (e.g. a background command finished): open one
+      turn = this.startWake(s);
+    }
     if (turn) {
       turn.lastActivity = Date.now();
       if (speaks && turn.awaitingWake) turn.woke = true;
@@ -544,7 +572,8 @@ export class Runtime {
       case "tool_call_update": {
         const state = mergeToolUpdate(s.tools.get(u.toolCallId), u);
         s.tools.set(state.id, state);
-        if (!turn && !isTerminal(state)) state.background = true;
+        // nothing waits for daemons/timers once agy has handed control back, or for tools outside a reply
+        if (!isTerminal(state) && (!turn || (turn.awaitingWake && runsForever(state)))) state.background = true;
         s.notifyTool(state.id);
         // updates of shown tools go straight to their mirror waiters, not through the stream
         if (turn && !s.emitted.has(state.id)) turn.queue.push({ kind: "update", update: u });
@@ -582,23 +611,26 @@ export class Runtime {
     const cancelled = { outcome: { outcome: "cancelled" } };
     if (!s) return cancelled;
     const tc = params.toolCall ?? {};
-    if (tc.toolCallId) {
+    const isQuestion = typeof tc.toolCallId === "string" && tc.toolCallId.startsWith("interaction_");
+    if (tc.toolCallId && !isQuestion) { // a question is not a tool: it would never get a terminal update
       const state = mergeToolUpdate(s.tools.get(tc.toolCallId), tc);
       s.tools.set(state.id, state);
     }
     const options: any[] = Array.isArray(params.options) ? params.options : [];
-    const isQuestion = typeof tc.toolCallId === "string" && tc.toolCallId.startsWith("interaction_");
     if (!isQuestion) {
       // Full access, like pi itself. Maintenance (ephemeral) sessions never run tools,
       // and nothing more runs once the user pressed Stop.
-      const pick = s.ephemeral || s.turn?.cancelled
+      const pick = s.ephemeral || s.stopped
         ? options.find((o) => o.kind === "reject_once")
         : options.find((o) => o.kind === "allow_once") ?? options.find((o) => o.kind === "allow_always");
       return pick ? { outcome: { outcome: "selected", optionId: pick.optionId } } : cancelled;
     }
     // agy asking the user a question (pick one of its options) is not an approval: ask.
     const turn = s.activeTurn;
-    if (turn) turn.pendingPermissions++;
+    if (turn) {
+      turn.pendingPermissions++;
+      clearTimeout(turn.wakeTimer); // a reply waiting on the user does not end on silence
+    }
     try {
       const ctx = s.owner?.ctx();
       if (!ctx?.hasUI || !ctx.ui) return cancelled;

@@ -64,6 +64,9 @@ test("real agy 1.5.14 tool shapes map to pi-web friendly mirrors", () => {
   // a command agy finished in the background has no timing lines
   const bg = mirrorResult(mergeToolUpdate(undefined, { toolCallId: "b", kind: "execute", status: "completed", rawOutput: { output: "Command exited with code 0.\n\nCommand output:\nWAKE_DONE\n", exit_code: 0 } }));
   assert.equal(bg.content[0].text, "WAKE_DONE\n");
+  // plain output that merely looks like part of the header is left alone
+  const plain = mirrorResult(mergeToolUpdate(undefined, { toolCallId: "p", kind: "execute", status: "completed", rawOutput: { output: "\nCommand output:\nfoo", exit_code: 0 } }));
+  assert.equal(plain.content[0].text, "\nCommand output:\nfoo");
   const failed = mirrorResult(mergeToolUpdate(cmd, { toolCallId: "c", status: "completed", rawOutput: { output: "boom", exit_code: 2 } }));
   assert.equal(failed.isError, true);
   const write = mergeToolUpdate(undefined, { toolCallId: "w", name: "write_file", kind: "edit", title: "File hello.txt", status: "in_progress", locations: [{ path: "/w/hello.txt" }], rawInput: { Content: "hi\n", Path: "/w/hello.txt" } });
