@@ -1,6 +1,7 @@
 // End-to-end through the real pi SDK agent loop against the fake agy.
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import path from "node:path";
 import { after, test } from "node:test";
 import { assistants, createSession, lastText, runtime, setupEnv, sleep, until } from "./helpers.ts";
 
@@ -8,6 +9,11 @@ const env = setupEnv("e2e");
 after(async () => { await runtime()?.shutdown(); });
 
 test("text + thinking stream; only the user's text reaches agy", async () => {
+  // user-set prices via models.json overrides must reach the cost
+  fs.mkdirSync(path.join(env.root, "agent"), { recursive: true });
+  fs.writeFileSync(path.join(env.root, "agent", "models.json"), JSON.stringify({
+    providers: { antigravity: { modelOverrides: { "gemini-3.8-flash": { cost: { input: 1, output: 10, cacheRead: 0.1, cacheWrite: 0 } } } } },
+  }));
   const { session } = await createSession(env);
   await session.prompt("SCRIPT:text");
   const a = assistants(session).at(-1);
@@ -16,6 +22,8 @@ test("text + thinking stream; only the user's text reaches agy", async () => {
   assert.equal(a.stopReason, "stop");
   assert.match(a.responseId, /^agy:/);
   assert.equal(a.usage.totalTokens, 1234, "context usage comes from usage_update, not the cumulative total");
+  assert.deepEqual([a.usage.input, a.usage.cacheRead, a.usage.cacheWrite, a.usage.output], [900, 6000, 0, 34], "token classes are agy's billed totals");
+  assert.ok(Math.abs(a.usage.cost.total - (900 * 1 + 6000 * 0.1 + 34 * 10) / 1e6) < 1e-12, "cost uses the configured prices");
   const frames = env.frames();
   const init = frames.find((f) => f.method === "initialize");
   assert.equal(init.params.clientInfo.name, "pi-agy-acp");

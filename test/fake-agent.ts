@@ -80,7 +80,7 @@ function serve() {
     const finish = (stopReason: string) => {
       running.delete(sessionId);
       u({ sessionUpdate: "usage_update", used: 1234, size: 1048576 });
-      send({ jsonrpc: "2.0", id: run.promptId, result: { stopReason, usage: { inputTokens: 900, outputTokens: 34, totalTokens: 99999 } } });
+      send({ jsonrpc: "2.0", id: run.promptId, result: { stopReason, usage: { inputTokens: 900, outputTokens: 34, cachedReadTokens: 6000, cachedWriteTokens: 0, thoughtTokens: 20, totalTokens: 99999 } } });
     };
     const script = /SCRIPT:(\w+)/.exec(text)?.[1];
     const cwd = "/tmp/fake-ws";

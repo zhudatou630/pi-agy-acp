@@ -1,5 +1,5 @@
 // streamSimple: pi context → ACP prompt (or continuation) → pi assistant events.
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { calculateCost, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { AssistantMessage, AssistantMessageEventStream, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { type Binding, type BindingFile, inputHash, matchBinding, newInputs, newResponseId, splitFresh } from "./bindings.ts";
 import { mirrorCall, planMarkdown } from "./mirror.ts";
@@ -23,8 +23,10 @@ class Writer {
   private open: { type: "text" | "thinking"; index: number } | undefined;
   private started = false;
   readonly stream: AssistantMessageEventStream;
+  private readonly model: Model<any>;
   constructor(stream: AssistantMessageEventStream, model: Model<any>, responseId?: string) {
     this.stream = stream;
+    this.model = model;
     this.msg = {
       role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id,
       timestamp: Date.now(), stopReason: "pending",
@@ -73,12 +75,20 @@ class Writer {
     this.stream.push({ type: "toolcall_end", contentIndex: index, toolCall: call, partial: this.msg });
   }
 
-  done(reason: "stop" | "toolUse" | "length", usage?: { used?: number; output?: number }): void {
+  done(reason: "stop" | "toolUse" | "length", usage?: Usage): void {
     this.start();
     this.close();
+    // Token classes are agy's billed totals for the whole turn (all internal calls); totalTokens stays the
+    // context size from usage_update, which pi reads for its context estimate.
+    // shortcut: a turn with no usage_update (e.g. agy's own /compact) records nothing, as billed totals alone would pose as context size.
     if (usage?.used) {
-      const output = Math.min(usage.output ?? 0, usage.used);
-      Object.assign(this.msg.usage, { input: usage.used - output, output, totalTokens: usage.used });
+      const u = this.msg.usage;
+      u.input = usage.acp?.inputTokens ?? 0;
+      u.cacheRead = usage.acp?.cachedReadTokens ?? 0;
+      u.cacheWrite = usage.acp?.cachedWriteTokens ?? 0;
+      u.output = usage.acp?.outputTokens ?? 0; // includes thoughtTokens (measured)
+      u.totalTokens = usage.used;
+      calculateCost(this.model, u);
     }
     this.msg.stopReason = reason;
     this.stream.push({ type: "done", reason, message: this.msg });
@@ -203,7 +213,13 @@ async function applyPayloadHook(options: SimpleStreamOptions, payload: { session
   return replaced && Array.isArray(replaced.prompt) ? replaced : payload;
 }
 
-function finish(rt: Runtime, file: BindingFile, b: Binding, writer: Writer, reason: "stop" | "toolUse" | "length", usage?: { used?: number; output?: number }): void {
+/** `used`: context size from the last usage_update; `acp`: the prompt result's usage. */
+interface Usage {
+  used?: number;
+  acp?: { inputTokens?: number; outputTokens?: number; cachedReadTokens?: number; cachedWriteTokens?: number };
+}
+
+function finish(rt: Runtime, file: BindingFile, b: Binding, writer: Writer, reason: "stop" | "toolUse" | "length", usage?: Usage): void {
   b.produced.push({ id: writer.msg.responseId!, discardable: false });
   rt.store.save(file);
   writer.done(reason, usage);
@@ -236,7 +252,7 @@ async function pump(rt: Runtime, s: AcpSession, turn: Turn, writer: Writer, file
         if (stop === "refusal") return failWith(rt, file, b, writer, "error", "agy refused this request (refusal)");
         b.failedKey = undefined;
         const reason = stop === "max_tokens" || stop === "max_turn_requests" ? "length" : "stop";
-        return finish(rt, file, b, writer, reason, { used: s.usage.used, output: item.result?.usage?.outputTokens });
+        return finish(rt, file, b, writer, reason, { used: s.usage.used, acp: item.result?.usage });
       }
       const u = item.update;
       await (options as any).onProviderStreamEvent?.(u, model);
@@ -319,7 +335,7 @@ async function runEphemeral(rt: Runtime, model: Model<any>, messages: any[], opt
       if (item.kind === "end") {
         turn.closed = true;
         if (item.error || turn.cancelled) writer.fail(turn.cancelled ? "aborted" : "error", item.error?.message ?? "Cancelled");
-        else writer.done("stop", { used: session.usage.used, output: item.result?.usage?.outputTokens });
+        else writer.done("stop", { used: session.usage.used, acp: item.result?.usage });
         return;
       }
       if (item.kind === "update") appendChunk(writer, item.update);

@@ -105,6 +105,7 @@
 - 输出不是流式的。命令结果在 completed 那一帧一次性给出，文本前面带有 "Created At / Completed At / exit code" 前缀。
 - 正文里的文件引用写成 `[name](file:///abs/path)` 形式。
 - `totalTokens` 是这一轮里多次内部模型调用的累计值（26553），比实际上下文占用（`usage_update.used` = 9118）大很多，不能直接当作上下文用量。
+- prompt 结果的 usage 满足 `totalTokens = inputTokens + outputTokens + cachedReadTokens`，`inputTokens` 不含缓存部分；`thoughtTokens` 包含在 `outputTokens` 里（flash high 实测：output 608、thought 606）。同一会话第二轮 `cachedReadTokens` 6720 / 输入 9528，说明隐式缓存生效。
 - 这几次探测里都没有出现 `plan` 通知。thought 只有在档位较高时才会出现（neon high 的 `thoughtTokens` 是 109）。
 
 ## 5. 图片

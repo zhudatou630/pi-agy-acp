@@ -193,7 +193,7 @@ sequenceDiagram
   - 没有 thought_level 的模型：`reasoning: false`。
   - pi 选中某个档位后，`options.reasoning` 会给出 pi 的档位值，provider 用 `set_config_option(thought_level)` 设置；值和缓存一致时不重复发送。
   - 如果 `off: null` 没法排除 off 档，就把 off 映射到 low，并在 README 里说明。
-- **其他字段**：`input: ["text","image"]`；`contextWindow` 用观察到的 `usage_update.size`，默认 1048576；`maxTokens` 设为 65536（仅供 pi 计算用）；`cost` 全部为 0（订阅制，不估算价格）。
+- **其他字段**：`input: ["text","image"]`；`contextWindow` 用观察到的 `usage_update.size`，默认 1048576；`maxTokens` 设为 65536（仅供 pi 计算用）；`cost` 默认为 0；用户在 `models.json` 的 `modelOverrides` 里填了价格时，按 3.12 计算费用。
 - **auth**：用 `createProvider` 写原生 Provider，`auth.apiKey.resolve` 在找到 agy 可执行文件时返回 `{auth:{}, source:"Antigravity CLI"}`。不需要伪造 key，pi 的模型列表也会把它当作“已配置”。
 
 ### 3.4 图片
@@ -293,11 +293,11 @@ sequenceDiagram
 ### 3.12 用量
 
 - 在 ACP turn 的**最后一条** pi 消息上写用量，中间那些 toolUse 消息都写 0：
+  - `input` / `cacheRead` / `cacheWrite` / `output` = prompt 结果里的 `inputTokens` / `cachedReadTokens` / `cachedWriteTokens` / `outputTokens`，是这一轮所有内部调用的计费累计；`outputTokens` 已含 `thoughtTokens`；
   - `totalTokens` = 最后一次 `usage_update.used`，即上下文占用；
-  - `output` = `outputTokens`；
-  - `input` = `used − output`；
-  - `cost` 为 0。
-- 不使用累计的 `totalTokens`，因为它会污染 pi 的上下文估算和其他 provider（Zac #80 的教训）。原始 usage 只写进 debug 日志。
+  - `cost` = `calculateCost(model, usage)`，价格取模型定义（含用户的 `modelOverrides`）。
+- 因此 `totalTokens` 不等于各项之和。pi 的上下文估算优先读 `totalTokens`，所以不能把累计值写进去，否则会污染上下文估算（Zac #80 的教训）。pi-web 的用量面板按各项求和，上下文条读 `totalTokens`，两者各自正确。
+- 没有 `usage_update` 的 turn（如 agy 自己的 `/compact`）不记用量：只有计费值时，pi 会把各项之和当成上下文占用。被 steer 接管的 prompt 没有 usage，这部分会少算。
 
 ## 4. 发给 agy 的内容（干净性约定）
 
