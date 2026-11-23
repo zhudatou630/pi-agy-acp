@@ -170,6 +170,27 @@ function serve() {
         u({ sessionUpdate: "usage_update", used: 1500, size: 1048576 });
         return;
       }
+      case "bgrerun": {
+        // during its own work agy reruns a command that goes to the background, and says so in a
+        // closing model call (usage_update) before the rerun ends; its report comes seconds later
+        const first = { toolCallId: "bgr1", kind: "execute", title: "check", rawInput: { CommandLine: "check", IsDaemon: false } };
+        u({ sessionUpdate: "tool_call", ...first, status: "in_progress" });
+        finish("end_turn");
+        await sleep(300);
+        u({ sessionUpdate: "tool_call_update", ...first, status: "completed", rawOutput: { output: "bad", exit_code: 1 } });
+        u({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "fix and rerun" } });
+        u({ sessionUpdate: "usage_update", used: 1400, size: 1048576 });
+        const rerun = { toolCallId: "bgr2", kind: "execute", title: "check", rawInput: { CommandLine: "check", IsDaemon: false } };
+        u({ sessionUpdate: "tool_call", ...rerun, status: "in_progress" });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "rerunning check " } });
+        u({ sessionUpdate: "usage_update", used: 1450, size: 1048576 });
+        await sleep(300);
+        u({ sessionUpdate: "tool_call_update", ...rerun, status: "completed", rawOutput: { output: "ok", exit_code: 0 } });
+        await sleep(3000); // generating the report silently, longer than the settle window
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "rerun reported" } });
+        u({ sessionUpdate: "usage_update", used: 1500, size: 1048576 });
+        return;
+      }
       case "bglong": {
         const longCmd = { toolCallId: "bgl", kind: "execute", title: "sleep 600", rawInput: { CommandLine: "sleep 600", IsDaemon: false } };
         u({ sessionUpdate: "tool_call", ...longCmd, status: "in_progress" });

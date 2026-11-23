@@ -580,8 +580,12 @@ export class Runtime {
     switch (u.sessionUpdate) {
       case "tool_call":
       case "tool_call_update": {
-        const state = mergeToolUpdate(s.tools.get(u.toolCallId), u);
+        const prev = s.tools.get(u.toolCallId);
+        const held = !!prev && holdsTurn(prev); // before the merge, which updates prev in place
+        const state = mergeToolUpdate(prev, u);
         s.tools.set(state.id, state);
+        // agy reports on a finished command in new model calls: steps closed before it ended do not count
+        if (turn?.awaitingWake && held && isTerminal(state)) turn.woke = turn.stepDone = false;
         // nothing waits for daemons/timers once agy has handed control back, or for tools outside a reply
         if (!isTerminal(state) && (!turn || (turn.awaitingWake && runsForever(state)))) state.background = true;
         s.notifyTool(state.id);

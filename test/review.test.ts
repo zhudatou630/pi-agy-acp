@@ -146,6 +146,13 @@ test("agy's own multi-step work after a background command stays one reply and k
   assert.ok(armed.some((t) => t - t0 > 3500), "agy's unprompted updates push idle shutdown back");
 });
 
+test("a command agy reruns on its own holds the reply until agy reports on it", async () => {
+  const { session } = await createSession(env);
+  await session.prompt("SCRIPT:bgrerun");
+  assert.ok(!session.messages.some((m: any) => m.role === "custom" && m.customType === "agy-wake"), "the report after the rerun must not open a wake reply");
+  assert.match(lastText(session), /rerun reported/);
+});
+
 test("a normal command whose title mentions 'schedule' still holds the reply", async () => {
   const { session } = await createSession(env);
   await session.prompt("SCRIPT:schedtitle");
