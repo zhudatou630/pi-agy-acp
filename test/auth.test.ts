@@ -12,7 +12,7 @@ test("unauthenticated prompt fails with login guidance and does not retry", asyn
   await session.prompt("hello");
   const a = assistants(session).at(-1);
   assert.equal(a.stopReason, "error");
-  assert.match(a.errorMessage, /未登录[\s\S]*\/agy login/);
+  assert.match(a.errorMessage, /Not signed in[\s\S]*\/agy login/);
   assert.ok(mock.calls.some((c) => c.method === "notify" && c.args[1] === "error"));
   assert.equal(env.frames().filter((f) => f.method === "session/new").length, 1);
 });
@@ -24,7 +24,7 @@ test("/agy login shows the URL, sends the pasted code, then works", async () => 
   const input = mock.calls.find((c) => c.method === "input");
   assert.match(input!.args[0], /https:\/\/accounts\.google\.com\/o\/oauth2\/auth\?client_id=fake/);
   assert.ok(env.frames().some((f) => f.login === "good-code"));
-  assert.ok(mock.calls.some((c) => c.method === "notify" && /登录成功/.test(c.args[0])), JSON.stringify(mock.calls));
+  assert.ok(mock.calls.some((c) => c.method === "notify" && /Signed in/.test(c.args[0])), JSON.stringify(mock.calls));
   await session.prompt("hello again");
   assert.match(lastText(session), /hello again$/);
 });

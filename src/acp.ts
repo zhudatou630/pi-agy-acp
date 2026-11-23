@@ -86,7 +86,7 @@ export class AcpProcess {
   }
 
   request<T = any>(method: string, params: unknown, timeoutMs?: number): Promise<T> {
-    if (this.exited) return Promise.reject(new AcpExitError(`agy acp 进程已退出，无法调用 ${method}`));
+    if (this.exited) return Promise.reject(new AcpExitError(`agy acp process has exited; cannot call ${method}`));
     const id = ++this.nextId;
     return new Promise<T>((resolve, reject) => {
       let timer: NodeJS.Timeout | undefined;
@@ -101,7 +101,7 @@ export class AcpProcess {
         reject: (e) => done(() => reject(e)),
       });
       if (timeoutMs) {
-        timer = setTimeout(() => this.pending.get(id)?.reject(new AcpError(method, -32001, `${method} 超时（${timeoutMs} ms）`)), timeoutMs);
+        timer = setTimeout(() => this.pending.get(id)?.reject(new AcpError(method, -32001, `${method} timed out (${timeoutMs} ms)`)), timeoutMs);
       }
       this.send({ jsonrpc: "2.0", id, method, params });
     });
@@ -188,7 +188,7 @@ export class AcpProcess {
     this.signalGroup("SIGKILL"); // agy is gone (crash or kill): take whatever it started with it
     const stderr = (extra ? extra + "\n" : "") + this.stderrTail;
     this.opts.debug.write("exit", { code, signal, stderr: stderr.slice(-500) });
-    const err = new AcpExitError(`agy acp 进程已退出（code=${code}, signal=${signal}）${extra ? "：" + extra : ""}`);
+    const err = new AcpExitError(`agy acp process exited (code=${code}, signal=${signal})${extra ? ": " + extra : ""}`);
     for (const p of [...this.pending.values()]) p.reject(err);
     this.pending.clear();
     for (const w of this.exitWaiters) w();

@@ -24,7 +24,7 @@ test("pi's automatic retry does not resend a prompt agy already received", async
   await session.prompt("SCRIPT:fail429");
   await until(() => !session.isStreaming, 5000);
   assert.equal(promptsWith("SCRIPT:fail429").length, 1);
-  assert.match(assistants(session).at(-1).errorMessage, /没有自动重发/);
+  assert.match(assistants(session).at(-1).errorMessage, /not resending automatically/);
 });
 
 test("steer before agy said anything: answer comes after the steer message", async () => {
@@ -61,7 +61,7 @@ test("agy crashes during a mirror wait: the error shows, no restart without new 
   await run;
   const last = assistants(session).at(-1);
   assert.equal(last.stopReason, "error");
-  assert.match(last.errorMessage, /agy 进程退出/);
+  assert.match(last.errorMessage, /agy process exited/);
   assert.equal(runtime().proc, undefined, "not restarted just to drain");
   assert.equal(spawnsBefore, 1);
 });

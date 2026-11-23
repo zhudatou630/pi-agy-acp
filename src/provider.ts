@@ -132,7 +132,7 @@ async function run(inst: Instance, model: Model<any>, messages: any[], options: 
       session = attached?.id === b.acpSessionId && attached.activeTurn ? attached : await rt.resumeSession(b.acpSessionId, b.cwd);
       if (!session) {
         history = match.anchor >= 0 ? messages.slice(0, match.anchor + 1).filter((m) => m.role !== "system") : splitFresh(messages).history;
-        notice = "原来的 agy 会话已不存在，已新建会话并附上之前的对话转录。";
+        notice = "The previous agy session no longer exists; started a new one with the earlier conversation transcript.";
         file.bindings = file.bindings.filter((x) => x !== b);
       }
     } else {
@@ -165,12 +165,11 @@ async function run(inst: Instance, model: Model<any>, messages: any[], options: 
       if (b!.failedKey === key) {
         // pi retries "transient" errors by resending; agy may already have acted on this prompt
         b!.failedKey = undefined;
-        return failWith(rt, file, b!, writer, "error", "上一轮 agy 出错后，为避免重复执行，没有自动重发。需要的话请再发一次。");
+        return failWith(rt, file, b!, writer, "error", "agy failed on the previous attempt; not resending automatically so it does not repeat its actions. Send again to retry.");
       }
-      flushBackground(session, writer);
       await rt.applyConfig(session, { model: model.id, piLevel: (options as any).reasoning });
       const payload = await applyPayloadHook(options, { sessionId: session.id, prompt }, model);
-      if (signal?.aborted) return failWith(rt, file, b!, writer, "aborted", "已取消");
+      if (signal?.aborted) return failWith(rt, file, b!, writer, "aborted", "Cancelled");
       turn = await rt.prompt(session, payload.prompt);
       turn.promptKey = key;
     } else if (blocks.length && !turn.ended) {
@@ -195,19 +194,6 @@ function appendChunk(writer: Writer, u: any): boolean {
   else if (u.sessionUpdate === "agent_thought_chunk") writer.append("thinking", u.content.text);
   else return false;
   return true;
-}
-
-function flushBackground(session: AcpSession, writer: Writer): void {
-  if (!session.idleBuffer.length) return;
-  const lines: string[] = [];
-  let text = "";
-  for (const u of session.idleBuffer) {
-    if (u.sessionUpdate === "agent_message_chunk" && u.content?.type === "text") text += u.content.text;
-    else if (u.sessionUpdate === "tool_call_update" && (u.status === "completed" || u.status === "failed")) lines.push(`${u.status === "completed" ? "完成" : "失败"}：${u.title ?? u.toolCallId}`);
-  }
-  session.idleBuffer = [];
-  const body = [...lines, text.trim()].filter(Boolean).join("\n");
-  if (body) writer.append("thinking", `〔后台活动，上一轮结束后 agy 的输出〕\n${body}\n`);
 }
 
 async function applyPayloadHook(options: SimpleStreamOptions, payload: { sessionId: string; prompt: AcpBlock[] }, model: Model<any>) {
@@ -242,12 +228,12 @@ async function pump(rt: Runtime, s: AcpSession, turn: Turn, writer: Writer, file
       if (item.kind === "end") {
         turn.closed = true;
         const stop = item.result?.stopReason;
-        if (turn.cancelled || stop === "cancelled") return failWith(rt, file, b, writer, "aborted", "已取消");
+        if (turn.cancelled || stop === "cancelled") return failWith(rt, file, b, writer, "aborted", "Cancelled");
         if (item.error) {
           b.failedKey = turn.promptKey;
           return failWith(rt, file, b, writer, "error", item.error.message);
         }
-        if (stop === "refusal") return failWith(rt, file, b, writer, "error", "agy 拒绝了这个请求（refusal）");
+        if (stop === "refusal") return failWith(rt, file, b, writer, "error", "agy refused this request (refusal)");
         b.failedKey = undefined;
         const reason = stop === "max_tokens" || stop === "max_turn_requests" ? "length" : "stop";
         return finish(rt, file, b, writer, reason, { used: s.usage.used, output: item.result?.usage?.outputTokens });
@@ -260,7 +246,7 @@ async function pump(rt: Runtime, s: AcpSession, turn: Turn, writer: Writer, file
         if (!md || md === turn.lastPlan) continue;
         turn.lastPlan = md;
         const id = `agy_plan_${newResponseId(s.id).slice(-12)}`;
-        s.tools.set(id, { id, kind: "plan", title: "计划", status: "completed", content: [{ type: "content", content: { type: "text", text: md } }], locations: [] });
+        s.tools.set(id, { id, kind: "plan", title: "Plan", status: "completed", content: [{ type: "content", content: { type: "text", text: md } }], locations: [] });
         s.emitted.add(id);
         writer.toolCall(id, "agy_todo", { entries: u.entries });
         return finish(rt, file, b, writer, "toolUse");
@@ -308,7 +294,7 @@ async function drainAborted(rt: Runtime, s: AcpSession, turn: Turn, writer: Writ
     if (item.kind === "end") turn.closed = true;
   }
   turn.closed = true;
-  failWith(rt, file, b, writer, "aborted", "已取消");
+  failWith(rt, file, b, writer, "aborted", "Cancelled");
 }
 
 /** Requests outside the pi session (compaction, summaries): one-shot session, text only, tools denied. */
@@ -325,14 +311,14 @@ async function runEphemeral(rt: Runtime, model: Model<any>, messages: any[], opt
     const transcript = historyTranscript(history, REPLAY_MAX_CHARS);
     const prompt: AcpBlock[] = transcript ? [{ type: "text", text: transcript }, ...blocks] : blocks;
     const payload = await applyPayloadHook(options, { sessionId: session.id, prompt }, model);
-    if (signal?.aborted) return writer.fail("aborted", "已取消");
+    if (signal?.aborted) return writer.fail("aborted", "Cancelled");
     const turn = await rt.prompt(session, payload.prompt);
     for (;;) {
       const item = await turn.queue.next(undefined, signal);
-      if (item === TIMEOUT) return writer.fail("aborted", "已取消"); // aborted; closeSession cancels agy
+      if (item === TIMEOUT) return writer.fail("aborted", "Cancelled"); // aborted; closeSession cancels agy
       if (item.kind === "end") {
         turn.closed = true;
-        if (item.error || turn.cancelled) writer.fail(turn.cancelled ? "aborted" : "error", item.error?.message ?? "已取消");
+        if (item.error || turn.cancelled) writer.fail(turn.cancelled ? "aborted" : "error", item.error?.message ?? "Cancelled");
         else writer.done("stop", { used: session.usage.used, output: item.result?.usage?.outputTokens });
         return;
       }

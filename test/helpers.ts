@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { VERSION } from "../src/runtime.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const FAKE_AGY = path.join(here, "fake-agy");
@@ -92,5 +93,5 @@ export async function until(fn: () => boolean, ms = 5000): Promise<void> {
 }
 
 export function runtime(): any {
-  return (globalThis as any)[Symbol.for("pi-agy-acp.runtime.0.1.0")];
+  return (globalThis as any)[Symbol.for(`pi-agy-acp.runtime.${VERSION}`)];
 }

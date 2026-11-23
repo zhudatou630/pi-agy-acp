@@ -8,7 +8,7 @@ import { type Catalog, loadCatalog, mapThinkingLevel, saveCatalog } from "./cata
 import { DebugLog } from "./debug.ts";
 import { isTerminal, mergeToolUpdate, type ToolState } from "./mirror.ts";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 /** ~/.pi/agent/pi-agy-acp/config.json */
 export interface RuntimeConfig {
@@ -21,17 +21,21 @@ export const REPLAY_MAX_CHARS = 60_000;
 export const CANCEL_WAIT_MS = 10_000;
 const IDLE_SHUTDOWN_MS = 600_000;
 const WATCHDOG_MS = 600_000;
+/** After a background command finishes, how long agy may take to start its own report. */
+const WAKE_GRACE_MS = 20_000;
+/** While agy reports on its own, how much silence ends the reply (it sends no prompt response). */
+const WAKE_QUIET_MS = 3_000;
 
 export class AuthRequiredError extends Error {
   constructor() {
-    super("Antigravity 未登录。请运行 /agy login 按提示完成 Google 登录，或在终端执行 `agy` 登录后再发送。");
+    super("Not signed in to Antigravity. Run /agy login, or sign in with `agy` in a terminal, then send again.");
     this.name = "AuthRequiredError";
   }
 }
 
 export class AgyMissingError extends Error {
   constructor() {
-    super("找不到 agy 可执行文件。请安装 Antigravity CLI（确认 `agy --version` 可用），或在 ~/.pi/agent/pi-agy-acp/config.json 里设置 agyPath。");
+    super("agy executable not found. Install the Antigravity CLI (check `agy --version`), or set agyPath in ~/.pi/agent/pi-agy-acp/config.json.");
     this.name = "AgyMissingError";
   }
 }
@@ -105,14 +109,30 @@ export class Turn {
   /** Hash of the prompt that opened the turn (retry guard). */
   promptKey = "";
   lastPlan = "";
+  /**
+   * The prompt has returned but agy still owes a reply: a command it moved to the background is
+   * running (it reports when done), or agy started talking on its own. Ends on silence.
+   */
+  awaitingWake = false;
+  /** agy has started its own report. */
+  woke = false;
+  endResult: any;
+  wakeTimer: NodeJS.Timeout | undefined;
   readonly abort = new AbortController();
   lastActivity = Date.now();
+}
+
+/** A command agy moved to the background that finishes on its own; daemons and schedules never do. */
+function holdsTurn(t: ToolState): boolean {
+  return !isTerminal(t) && t.kind === "execute" && t.rawInput?.IsDaemon !== true && !/schedule/i.test(t.title ?? "");
 }
 
 /** What the runtime needs from the pi side of a session (one extension instance). */
 export interface SessionOwner {
   ctx(): any | undefined;
   onTitle?(title: string): void;
+  /** agy started talking on its own (a background command finished) with no reply open in pi. */
+  onWake?(): void;
 }
 
 export class AcpSession {
@@ -124,7 +144,6 @@ export class AcpSession {
   emitted = new Set<string>();
   private toolWaiters = new Map<string, Set<() => void>>();
   turn: Turn | undefined;
-  idleBuffer: any[] = [];
   owner: SessionOwner | undefined;
   usage: { used?: number; size?: number } = {};
   /** Cancel never settled: do not reuse without close + resume. */
@@ -174,7 +193,7 @@ export class AcpSession {
       };
       const onAbort = () => {
         const s = this.tools.get(id);
-        if (s && !isTerminal(s)) s.aborted = "已取消";
+        if (s && !isTerminal(s)) s.aborted = "Cancelled";
         check();
       };
       const set = this.toolWaiters.get(id) ?? new Set<() => void>();
@@ -373,8 +392,8 @@ export class Runtime {
     this.sessions.delete(id);
     if (s) {
       this.cancel(s);
-      this.endTurnNow(s, new Error("agy 会话已关闭"));
-      s.settleTools((t) => { t.aborted = "会话已关闭"; });
+      this.endTurnNow(s, new Error("agy session closed"));
+      s.settleTools((t) => { t.aborted = "agy session closed"; });
     }
     if (this.proc?.alive) await this.proc.request("session/close", { sessionId: id }, 10_000).catch(() => {});
   }
@@ -393,7 +412,7 @@ export class Runtime {
       const res = await proc.request("session/set_config_option", { sessionId: s.id, configId, value }, 30_000);
       s.setConfigOptions(res?.configOptions);
     } catch (err) {
-      if (err instanceof AcpError) throw new AcpError(err.method, err.code, `agy 拒绝设置 ${configId}=${value}：${err.message}`);
+      if (err instanceof AcpError) throw new AcpError(err.method, err.code, `agy rejected ${configId}=${value}: ${err.message}`);
       throw err;
     }
   }
@@ -410,6 +429,8 @@ export class Runtime {
     }
     const n = ++turn.latestPrompt;
     turn.lastActivity = Date.now();
+    turn.awaitingWake = false; // a prompt is in flight again (steer)
+    clearTimeout(turn.wakeTimer);
     proc.request("session/prompt", { sessionId: s.id, prompt: blocks }).then(
       (result) => this.endTurn(s, turn, n, { result }),
       (error: Error) => this.endTurn(s, turn, n, { error: isAuthError(error) ? new AuthRequiredError() : error }),
@@ -419,10 +440,24 @@ export class Runtime {
 
   private endTurn(s: AcpSession, turn: Turn, n: number, item: { result?: any; error?: Error }): void {
     if (turn.latestPrompt !== n || turn.ended) return; // superseded by a steer
+    if (item.result && !turn.cancelled && [...s.tools.values()].some(holdsTurn)) {
+      // agy moved a command to the background and reports when it is done: keep the pi reply
+      // open, like pi's own bash. Daemons and schedules do not hold it.
+      turn.awaitingWake = true;
+      turn.endResult = item.result;
+      s.settleTools((t) => { if (!holdsTurn(t)) t.background = true; });
+      return;
+    }
+    this.finishTurn(s, turn, item);
+  }
+
+  private finishTurn(s: AcpSession, turn: Turn, item: { result?: any; error?: Error }): void {
+    if (turn.ended) return;
+    clearTimeout(turn.wakeTimer);
     turn.ended = true;
     s.settleTools((t) => {
       if (item.error) t.aborted = item.error.message;
-      else if (turn.cancelled) t.aborted = "已取消";
+      else if (turn.cancelled) t.aborted = "Cancelled";
       else t.background = true;
     });
     turn.abort.abort();
@@ -434,9 +469,33 @@ export class Runtime {
     const turn = s.turn;
     if (!turn || turn.ended) return;
     turn.latestPrompt++;
+    clearTimeout(turn.wakeTimer);
     turn.ended = true;
     turn.abort.abort();
     turn.queue.push({ kind: "end", error });
+  }
+
+  /** A reply agy starts on its own (no prompt): opened in pi through the owner. */
+  private startWake(s: AcpSession): Turn {
+    const turn = new Turn();
+    turn.awaitingWake = true;
+    turn.woke = true;
+    turn.endResult = { stopReason: "end_turn" };
+    s.turn = turn;
+    s.pruneTools();
+    s.usage.used = undefined;
+    this.armWatchdog(s, turn);
+    s.owner?.onWake?.();
+    return turn;
+  }
+
+  /** While agy owes a reply: end it once nothing runs and agy has been quiet for a moment. */
+  private wakeCheck(s: AcpSession, turn: Turn): void {
+    if (!turn.awaitingWake || turn.ended) return;
+    clearTimeout(turn.wakeTimer);
+    turn.wakeTimer = undefined;
+    if (turn.pendingPermissions > 0 || [...s.tools.values()].some((t) => !isTerminal(t))) return;
+    turn.wakeTimer = setTimeout(() => this.finishTurn(s, turn, { result: turn.endResult }), turn.woke ? WAKE_QUIET_MS : WAKE_GRACE_MS);
   }
 
   cancel(s: AcpSession): void {
@@ -445,6 +504,8 @@ export class Runtime {
     turn.cancelled = true;
     turn.abort.abort(); // dismiss permission dialogs
     this.proc?.notify("session/cancel", { sessionId: s.id });
+    // no prompt in flight to return "cancelled": end it here (agy stops the background command)
+    if (turn.awaitingWake) this.finishTurn(s, turn, { result: turn.endResult });
   }
 
   private armWatchdog(s: AcpSession, turn: Turn): void {
@@ -453,7 +514,7 @@ export class Runtime {
       const busy = turn.pendingPermissions > 0 || [...s.tools.values()].some((t) => !isTerminal(t));
       if (!busy && Date.now() - turn.lastActivity > WATCHDOG_MS) {
         this.cancel(s);
-        this.endTurnNow(s, new Error(`agy 超过 ${WATCHDOG_MS / 60000} 分钟没有任何输出，已取消本轮`));
+        this.endTurnNow(s, new Error(`agy produced no output for ${WATCHDOG_MS / 60000} minutes; cancelled this turn`));
         s.broken = true;
         return;
       }
@@ -468,55 +529,55 @@ export class Runtime {
     if (method !== "session/update") return;
     const s = this.sessions.get(params?.sessionId);
     const u = params?.update;
-    if (!u) return;
-    if (!s) return;
-    const turn = s.turn && !s.turn.ended ? s.turn : undefined;
-    if (turn) turn.lastActivity = Date.now();
+    if (!u || !s) return;
+    let turn = s.turn && !s.turn.ended ? s.turn : undefined;
+    const speaks = ["agent_message_chunk", "agent_thought_chunk", "plan"].includes(u.sessionUpdate)
+      || (u.sessionUpdate === "tool_call" && !s.tools.has(u.toolCallId));
+    // agy talking with no reply open (e.g. a background command finished): open one
+    if (!turn && speaks && !s.ephemeral && (!s.turn || s.turn.closed)) turn = this.startWake(s);
+    if (turn) {
+      turn.lastActivity = Date.now();
+      if (speaks && turn.awaitingWake) turn.woke = true;
+    }
     switch (u.sessionUpdate) {
       case "tool_call":
       case "tool_call_update": {
         const state = mergeToolUpdate(s.tools.get(u.toolCallId), u);
         s.tools.set(state.id, state);
-        if (!turn && !isTerminal(state)) state.background = true; // started on its own between turns
+        if (!turn && !isTerminal(state)) state.background = true;
         s.notifyTool(state.id);
         // updates of shown tools go straight to their mirror waiters, not through the stream
         if (turn && !s.emitted.has(state.id)) turn.queue.push({ kind: "update", update: u });
-        else if (!turn && (state.status === "completed" || state.status === "failed")) this.background(s, { ...u, title: state.title });
-        return;
+        break;
       }
       case "agent_message_chunk":
       case "agent_thought_chunk":
       case "plan":
-        if (turn) turn.queue.push({ kind: "update", update: u });
-        else this.background(s, u);
-        return;
+        turn?.queue.push({ kind: "update", update: u });
+        break;
       case "usage_update":
         s.usage = { used: u.used, size: u.size };
         this.noteContextWindow(s, u.size);
-        return;
+        break;
       case "config_option_update":
         s.setConfigOptions(u.configOptions);
-        return;
+        break;
       case "current_mode_update": {
         const mode = s.configOptions.find((o) => o.id === "mode");
         if (mode) mode.currentValue = u.currentModeId;
-        return;
+        break;
       }
       case "session_info_update":
         if (u.title) s.owner?.onTitle?.(u.title);
-        return;
+        break;
       default:
-        return; // user_message_chunk only appears in load replays, which we do not use
+        break; // user_message_chunk only appears in load replays, which we do not use
     }
-  }
-
-  private background(s: AcpSession, u: any): void {
-    if (s.ephemeral) return;
-    s.idleBuffer.push(u); // shown folded at the start of the next reply, no toast
+    if (turn?.awaitingWake) this.wakeCheck(s, turn);
   }
 
   private async onRequest(method: string, params: any): Promise<unknown> {
-    if (method !== "session/request_permission") throw new AcpError(method, -32601, `pi-agy-acp 不支持 ${method}`);
+    if (method !== "session/request_permission") throw new AcpError(method, -32601, `pi-agy-acp does not support ${method}`);
     const s = this.sessions.get(params?.sessionId);
     const cancelled = { outcome: { outcome: "cancelled" } };
     if (!s) return cancelled;
@@ -546,7 +607,7 @@ export class Runtime {
     } catch {
       return cancelled;
     } finally {
-      if (turn) { turn.pendingPermissions--; turn.lastActivity = Date.now(); }
+      if (turn) { turn.pendingPermissions--; turn.lastActivity = Date.now(); this.wakeCheck(s, turn); }
     }
   }
 
@@ -555,9 +616,9 @@ export class Runtime {
     this.proc = undefined;
     this.init = undefined;
     this.lastExit = `code=${info.code} signal=${info.signal}`;
-    const err = new AcpExitError(`agy 进程退出（${this.lastExit}）。下次发送会自动重启并接回会话；本轮不会自动重发，以免重复执行操作。`);
+    const err = new AcpExitError(`agy process exited (${this.lastExit}). It restarts and resumes the session on your next message; this turn is not resent automatically so it does not repeat actions.`);
     for (const s of this.sessions.values()) {
-      s.settleTools((t) => { t.aborted = "agy 进程已退出"; });
+      s.settleTools((t) => { t.aborted = "agy process exited"; });
       this.endTurnNow(s, err);
     }
     this.sessions.clear();
@@ -657,7 +718,7 @@ async function askQuestion(ctx: any, tc: any, options: any[], signal?: AbortSign
     seen.set(l, n);
     return n > 1 ? `${l} (${n})` : l;
   });
-  const picked = await ctx.ui.select(`agy 提问：${tc.title || "请选择"}`, labels, { timeout: 600_000, signal });
+  const picked = await ctx.ui.select(`agy asks: ${tc.title || "choose one"}`, labels, { timeout: 600_000, signal });
   return picked === undefined ? undefined : options[labels.indexOf(picked)]?.optionId;
 }
 

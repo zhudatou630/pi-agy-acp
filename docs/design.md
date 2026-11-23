@@ -167,16 +167,18 @@ sequenceDiagram
 
 补充说明：
 
-- **diff 行号**：agy 给的是片段，不是整个文件。工具完成后，读一次当前文件内容，定位 newText 的位置，算出 `@@` 的行号；定位不到时就用片段 diff，并在 details 里标注“行号未知”，不伪造行号（T3 的做法）。用 `diff` 包（jsdiff）生成，这是唯一的运行时依赖。
+- **diff 行号**：agy 给的是片段，不是整个文件。工具完成后，读一次当前文件内容，定位 newText 的位置，算出 `@@` 的行号；定位不到时就用片段 diff，并在 details 里标注“行号未知”，不伪造行号（T3 的做法）。diff 由一个很小的内置函数生成，没有运行时依赖。
 - **工具 schema**：全部是宽松的 object，镜像不使用参数，只按 toolCallId 查找状态。
 - **toolCallId**：沿用 ACP 的 id；内部状态表的键是 `(acpSessionId, toolCallId)`。
 - **对模型隐藏**：用 `prepareLoadout` 返回 `hiddenDeclarations`，让镜像工具仍然可以执行，但不出现在任何模型的工具声明里，所以 Claude 等其他模型看不到它们。实现时第一项测试就要验证这一点；如果不可行，退回到“只在当前模型属于 agy 时才激活这些工具”。
 - **镜像的结束条件**：
   - 工具到达终态，正常返回。
-  - ACP turn 已经结束、工具却还在 in_progress（后台命令）时，返回“仍在后台运行（agy 管理）”，不标成成功。
+  - daemon 或定时任务（`IsDaemon: true`、schedule）在 agy 结束这一轮时还在运行：返回“Still running in the background”，不标成成功。
   - 进程退出时返回错误。
   - pi 中止时发送 `session/cancel`，返回 aborted。
-- **turn 结束之后才到的工具更新和消息**（后台命令完成、定时器唤醒）：先缓存起来，不弹通知（v0.3 定为方案 B）；下一轮回复开头以一段折叠的 thinking（“〔后台活动〕…”）显示出来。
+- **后台命令（v0.4）**：agy 的 `run_command` 超过 `WaitMsBeforeAsync` 后会转到后台，prompt 先以 `end_turn` 返回；命令跑完后，agy 会**不经 prompt 主动汇报**，以若干 chunk 加 `usage_update` 结束（实测见 `docs/research/agy-acp-handshake.md`）。处理方式和 pi 自己的 `bash` 一致：
+  - **非 daemon 命令占住回复**：prompt 返回时如果还有这类命令在跑，turn 不结束，镜像卡片一直显示运行中。命令结束、agy 的汇报流进同一条回复，然后 agy 静默 3 秒即结束（命令结束后 20 秒内 agy 没开口也结束）。期间按停止会发 `session/cancel`（agy 会终止后台命令），并立即结束回复。
+  - **daemon 和定时任务不占住回复**。之后 agy 如果主动开口，而 pi 里没有进行中的回复，插件用一条 `agy-wake` 自定义消息（内容为 `[agy] Background task update`，永远不发给 agy）触发一轮新回复，把 agy 的话流式显示出来。不需要等用户发下一条消息。
 
 ### 3.3 模型和思考档位
 

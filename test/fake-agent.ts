@@ -37,6 +37,7 @@ function serve() {
   let reqId = 0;
   const waiting = new Map<string | number, (v: any) => void>();
   const running = new Map<string, { promptId: number | string; cancelled: boolean; steers: string[] }>();
+  const cancelledSessions = new Set<string>();
 
   const send = (m: any) => process.stdout.write(JSON.stringify(m) + "\n");
   const update = (sessionId: string, u: any) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: u } });
@@ -136,13 +137,42 @@ function serve() {
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: run.steers.length ? `steer-received:${run.steers.join("|")}` : "finished" } });
         return finish("end_turn");
       }
-      case "background":
-        u({ sessionUpdate: "tool_call", toolCallId: "bg", kind: "execute", title: "sleep 1 && echo ok", status: "in_progress", rawInput: { CommandLine: "sleep 1 && echo ok" } });
-        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "started in background" } });
+      case "background": {
+        // like agy 1.5.14: WaitMsBeforeAsync moves the command to the background, the prompt
+        // returns, and when the command finishes agy reports on its own (no prompt response)
+        const bgCmd = { toolCallId: "bg", kind: "execute", title: "sleep 1 && echo ok", rawInput: { CommandLine: "sleep 1 && echo ok", IsDaemon: false, WaitMsBeforeAsync: 500 } };
+        u({ sessionUpdate: "tool_call", ...bgCmd, status: "in_progress" });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "started in background. " } });
         finish("end_turn");
-        await sleep(300);
-        u({ sessionUpdate: "tool_call_update", toolCallId: "bg", status: "completed", rawOutput: { output: "ok", exit_code: 0 } });
+        await sleep(400);
+        u({ sessionUpdate: "tool_call_update", ...bgCmd, status: "completed", rawOutput: { output: "ok", exit_code: 0 } });
+        await sleep(100);
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "background job printed ok" } });
+        u({ sessionUpdate: "usage_update", used: 1300, size: 1048576 });
+        return;
+      }
+      case "bglong": {
+        const longCmd = { toolCallId: "bgl", kind: "execute", title: "sleep 600", rawInput: { CommandLine: "sleep 600", IsDaemon: false } };
+        u({ sessionUpdate: "tool_call", ...longCmd, status: "in_progress" });
+        finish("end_turn");
+        // the background command only stops on session/cancel
+        for (let i = 0; i < 200; i++) {
+          await sleep(50);
+          if (run.cancelled || cancelledSessions.has(sessionId)) {
+            u({ sessionUpdate: "tool_call_update", ...longCmd, status: "failed", rawOutput: { output: "" } });
+            return;
+          }
+        }
+        return;
+      }
+      case "daemon":
+        u({ sessionUpdate: "tool_call", toolCallId: "dm", kind: "execute", title: "npm run dev", status: "in_progress", rawInput: { CommandLine: "npm run dev", IsDaemon: true } });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "dev server started" } });
+        finish("end_turn");
+        await sleep(600);
+        // later, unprompted
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "daemon says hi" } });
+        u({ sessionUpdate: "usage_update", used: 1400, size: 1048576 });
         return;
       case "question": {
         const res = await ask("session/request_permission", { sessionId, toolCall: { toolCallId: "interaction_1", title: "Pick a color" }, options: [{ optionId: "r", name: "Red", kind: "allow_once" }, { optionId: "b", name: "Blue", kind: "allow_once" }] });
@@ -238,6 +268,7 @@ function serve() {
       case "session/cancel": {
         const run = running.get(p.sessionId);
         if (run) run.cancelled = true;
+        cancelledSessions.add(p.sessionId); // also stops background commands
         return;
       }
       default:

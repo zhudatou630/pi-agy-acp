@@ -130,6 +130,8 @@ prompt 里放 `{"type":"image","mimeType":"image/png","data":"<base64>"}`，模�
 
 `WaitMsBeforeAsync: 500` 的命令被放到后台。本轮在约 9.7 s 时以 end_turn 结束，这时工具状态还停在 `in_progress`（之后被 cancel 标成 failed）。所以 **tool_call 可能比所在的这一轮活得更久**。
 
+后续实测（`sleep 20 && echo WAKE_DONE`，tool_call 里带 `IsDaemon:false, WaitMsBeforeAsync:500`）：prompt 在 9.6 s 以 `end_turn` 返回；26 s 时工具更新为 completed；随后 agy **在没有任何 prompt 的情况下主动发出** agent_message_chunk（"The background task has finished… WAKE_DONE"），最后发一条 `usage_update`。这段主动汇报没有对应的 prompt 响应。
+
 ## 10. slash 命令
 
 `session/prompt` 里直接发文本 `/compact` 就能生效：没有任何 update，只回 end_turn 和 usage。

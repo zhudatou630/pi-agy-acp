@@ -117,7 +117,7 @@ test("plan updates become an agy_todo card", async () => {
   const { session } = await createSession(env);
   await session.prompt("SCRIPT:plan");
   const result = session.messages.find((m: any) => m.role === "toolResult" && m.toolName === "agy_todo");
-  assert.match(result.content[0].text, /- \[x\] step one\n- \[ \] \*\*进行中\*\* step two/);
+  assert.match(result.content[0].text, /- \[x\] step one\n- \[ \] \*\*in progress\*\* step two/);
   assert.equal(lastText(session), "planned");
 });
 
@@ -127,17 +127,35 @@ test("session title from agy names the pi session", async () => {
   assert.equal(session.sessionManager.getSessionName(), "Fake Title");
 });
 
-test("background tool: card says still running; later output shows folded at the next turn, no toast", async () => {
+test("background command: the reply waits for it, then agy's own report arrives in the same reply", async () => {
   const { session, mock } = await createSession(env);
   await session.prompt("SCRIPT:background");
   const result = session.messages.find((m: any) => m.role === "toolResult" && m.toolCallId === "bg");
-  assert.match(result.content[0].text, /仍在后台运行/);
-  await sleep(600); // let the background completion arrive
+  assert.equal(result.content[0].text, "ok", "the card shows the real output, not 'still running'");
+  assert.match(lastText(session), /background job printed ok/);
+  assert.equal(assistants(session).at(-1).stopReason, "stop");
   assert.ok(!mock.calls.some((c) => c.method === "notify"), "no toast");
-  await session.prompt("what happened");
-  const a = assistants(session).at(-1);
-  const thinking = a.content.find((c: any) => c.type === "thinking")?.thinking ?? "";
-  assert.match(thinking, /background job printed ok/);
+});
+
+test("daemon command does not hold the reply; agy speaking later opens a reply by itself", async () => {
+  const { session } = await createSession(env);
+  await session.prompt("SCRIPT:daemon");
+  const card = session.messages.find((m: any) => m.role === "toolResult" && m.toolCallId === "dm");
+  assert.match(card.content[0].text, /Still running in the background/);
+  await until(() => !session.isStreaming && session.messages.some((m: any) => m.role === "assistant" && JSON.stringify(m.content).includes("daemon says hi")), 8000);
+  assert.ok(session.messages.some((m: any) => m.role === "custom" && m.customType === "agy-wake"));
+  assert.ok(!env.prompts().some((p) => JSON.stringify(p.params.prompt).includes("Background task update")), "the marker never reaches agy");
+});
+
+test("Stop while waiting for a background command cancels it and ends the reply", async () => {
+  const { session } = await createSession(env);
+  const run = session.prompt("SCRIPT:bglong");
+  await until(() => session.messages.some((m: any) => m.role === "assistant" && JSON.stringify(m.content).includes("agy_bash")), 5000);
+  await sleep(300);
+  await session.abort();
+  await run;
+  assert.equal(assistants(session).at(-1).stopReason, "aborted");
+  assert.ok(env.frames().some((f) => f.method === "session/cancel"));
 });
 
 test("restart: resume via list check, config re-applied, no new session", async () => {
@@ -167,7 +185,7 @@ test("lost ACP session: new session with a bounded history transcript", async ()
   const prompt = env.prompts().at(-1).params.prompt;
   assert.match(prompt[0].text, /^<pi_conversation_history[\s\S]*remember kiwi[\s\S]*<\/pi_conversation_history>/);
   assert.equal(prompt.at(-1).text.endsWith("what fruit?"), true);
-  assert.ok(mock.calls.some((c) => c.method === "notify" && /已不存在/.test(c.args[0])));
+  assert.ok(mock.calls.some((c) => c.method === "notify" && /no longer exists/.test(c.args[0])));
 });
 
 test("fork (new pi session id with copied history) gets its own ACP session plus replay", async () => {
@@ -187,7 +205,7 @@ test("crash mid-turn: error, no automatic resend, next prompt recovers", async (
   await session.prompt("SCRIPT:crash");
   const a = assistants(session).at(-1);
   assert.equal(a.stopReason, "error");
-  assert.match(a.errorMessage, /agy 进程退出/);
+  assert.match(a.errorMessage, /agy process exited/);
   await session.prompt("are you back?");
   assert.match(lastText(session), /are you back\?$/);
   assert.equal(env.prompts().filter((p) => JSON.stringify(p.params.prompt).includes("SCRIPT:crash")).length, 1);

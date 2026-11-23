@@ -13,7 +13,7 @@ if (!file) {
   const dir = path.join(process.env.PI_AGY_ACP_HOME ?? path.join(agentDir, "pi-agy-acp"), "logs");
   const logs = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".ndjson")).sort() : [];
   if (!logs.length) {
-    console.error(`没有抓包文件：${dir}（用 ACP_DEBUG=1 启动 pi，或在 pi 里执行 /agy debug on）`);
+    console.error(`No capture files in ${dir} (start pi with ACP_DEBUG=1, or run /agy debug on)`);
     process.exit(1);
   }
   file = path.join(dir, logs[logs.length - 1]);

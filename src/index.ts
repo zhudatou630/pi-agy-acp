@@ -7,15 +7,16 @@ import { type Binding, type BindingFile, inputHash } from "./bindings.ts";
 import { PROVIDER_ID, toPiModels } from "./catalog.ts";
 import { MIRROR_TOOLS, mirrorResult } from "./mirror.ts";
 import { createStreamSimple, type Instance } from "./provider.ts";
+import { WAKE_MARKER } from "./replay.ts";
 import { type AcpSession, getRuntime, type Runtime } from "./runtime.ts";
 
 const MIRROR_LABELS: Record<string, string> = {
-  agy_bash: "agy 命令",
-  agy_edit: "agy 编辑",
-  agy_write: "agy 写文件",
-  agy_read: "agy 读文件",
-  agy_tool: "agy 工具",
-  agy_todo: "agy 计划",
+  agy_bash: "agy command",
+  agy_edit: "agy edit",
+  agy_write: "agy write",
+  agy_read: "agy read",
+  agy_tool: "agy tool",
+  agy_todo: "agy plan",
 };
 
 export default function piAgyAcp(pi: ExtensionAPI) {
@@ -31,6 +32,11 @@ export default function piAgyAcp(pi: ExtensionAPI) {
     sessionId: () => ctx?.sessionManager?.getSessionId?.(),
     onTitle: (title) => {
       try { if (!pi.getSessionName()) pi.setSessionName(title); } catch {}
+    },
+    onWake: () => {
+      // pi has no reply open for this session: start one so agy's own report shows up now
+      if (!isOurModel() || !ctx?.isIdle?.()) return;
+      pi.sendMessage({ customType: "agy-wake", content: WAKE_MARKER, display: true }, { triggerTurn: true });
     },
     attach: (s, f, b) => { session = s; file = f; binding = b; },
     session: () => session,
@@ -71,7 +77,7 @@ export default function piAgyAcp(pi: ExtensionAPI) {
         ctx = toolCtx ?? ctx;
         const owner = session?.tools.has(toolCallId) ? session : undefined;
         if (!owner) {
-          return { content: [{ type: "text", text: "找不到这次 agy 工具调用的状态（可能 agy 进程已重启）。" }], details: {}, isError: true };
+          return { content: [{ type: "text", text: "No state for this agy tool call (agy may have restarted)." }], details: {}, isError: true };
         }
         const onAbort = () => rt.cancel(owner);
         signal?.addEventListener("abort", onAbort, { once: true });
@@ -82,7 +88,7 @@ export default function piAgyAcp(pi: ExtensionAPI) {
             const status = s.status;
             if (status === lastStatus || !onUpdate) return;
             lastStatus = status;
-            const note = s.status === "pending" ? "等待授权…" : s.status === "in_progress" ? "agy 正在执行…" : "";
+            const note = s.status === "pending" ? "Waiting for permission…" : s.status === "in_progress" ? "agy is running…" : "";
             if (note) onUpdate({ content: [{ type: "text", text: note }], details: undefined as any });
           });
           return mirrorResult(state) as any;
@@ -127,7 +133,7 @@ export default function piAgyAcp(pi: ExtensionAPI) {
   pi.on("session_start", () => { rt.listeners.add(onCatalog); });
 
   pi.registerCommand("agy", {
-    description: "Antigravity：status | models refresh | login | new | debug on|off | restart",
+    description: "Antigravity: status | models refresh | login | new | debug on|off | restart",
     getArgumentCompletions: (prefix: string) => {
       const items = ["status", "models refresh", "login", "new", "debug on", "debug off", "restart"];
       return items.filter((i) => i.startsWith(prefix)).map((value) => ({ value, label: value }));
@@ -141,9 +147,9 @@ export default function piAgyAcp(pi: ExtensionAPI) {
         switch (sub || "status") {
           case "status": return notify(status(rt, session));
           case "models": {
-            notify("正在探测 agy 模型和思考档位…");
+            notify("Probing agy models and thinking levels…");
             const cat = await rt.refreshCatalog();
-            return notify(`已更新 ${cat.models.length} 个模型：${cat.models.map((m) => m.id).join(", ")}`);
+            return notify(`Updated ${cat.models.length} models: ${cat.models.map((m) => m.id).join(", ")}`);
           }
           case "login": return await login(rt, c);
           case "new": {
@@ -154,17 +160,17 @@ export default function piAgyAcp(pi: ExtensionAPI) {
             binding = undefined;
             session = undefined;
             if (old) await rt.closeSession(old.id);
-            return notify("已断开当前 agy 会话；下次发送会新建会话并附上对话转录。");
+            return notify("Detached from the agy session; the next message starts a new one with the conversation transcript.");
           }
           case "debug": {
-            if (arg === "off") { rt.debug.disable(); return notify("ACP 抓包已关闭"); }
-            return notify(`ACP 抓包已开启：${rt.debug.enable()}`);
+            if (arg === "off") { rt.debug.disable(); return notify("ACP capture off"); }
+            return notify(`ACP capture on: ${rt.debug.enable()}`);
           }
           case "restart": {
             await rt.shutdown();
-            return notify("agy 进程已停止，下次发送时会自动重启并接回会话。");
+            return notify("agy process stopped; it restarts and resumes the session on the next message.");
           }
-          default: return notify(`未知子命令：${sub}`, "warning");
+          default: return notify(`Unknown subcommand: ${sub}`, "warning");
         }
       } catch (err) {
         notify(err instanceof Error ? err.message : String(err), "error");
@@ -187,11 +193,11 @@ export default function piAgyAcp(pi: ExtensionAPI) {
 
 function status(rt: Runtime, session: AcpSession | undefined): string {
   const lines = [
-    `agy：${rt.agyPath() ?? "未找到"}${rt.agyVersion ? ` v${rt.agyVersion}` : ""}`,
-    `进程：${rt.proc?.alive ? `运行中 pid ${rt.proc.pid}` : "未启动"}${rt.lastExit ? `（上次退出 ${rt.lastExit}）` : ""}`,
-    `订阅：${rt.catalog.tier ?? "未知"}`,
-    `当前会话：${session ? session.id : "未绑定"}${session ? `，model=${session.current("model")} thought=${session.current("thought_level") ?? "-"}` : ""}`,
-    `ACP 抓包：${rt.debug.enabled ? rt.debug.file : "关闭"}`,
+    `agy: ${rt.agyPath() ?? "not found"}${rt.agyVersion ? ` v${rt.agyVersion}` : ""}`,
+    `Process: ${rt.proc?.alive ? `running, pid ${rt.proc.pid}` : "not started"}${rt.lastExit ? ` (last exit ${rt.lastExit})` : ""}`,
+    `Subscription: ${rt.catalog.tier ?? "unknown"}`,
+    `Session: ${session ? session.id : "none"}${session ? `, model=${session.current("model")} thought=${session.current("thought_level") ?? "-"}` : ""}`,
+    `ACP capture: ${rt.debug.enabled ? rt.debug.file : "off"}`,
   ];
   return lines.join("\n");
 }
@@ -199,7 +205,7 @@ function status(rt: Runtime, session: AcpSession | undefined): string {
 /** Official terminal login (`agy acp --login`): show the URL, collect the code, verify. */
 async function login(rt: Runtime, c: any): Promise<void> {
   const command = rt.agyPath();
-  if (!command) return c.ui.notify("找不到 agy 可执行文件。", "error");
+  if (!command) return c.ui.notify("agy executable not found.", "error");
   // Without a display agy prints the URL instead of opening a local browser.
   const child = spawn(command, ["acp", "--login"], { env: rt.childEnv({ DISPLAY: undefined, WAYLAND_DISPLAY: undefined, BROWSER: undefined }), stdio: ["pipe", "pipe", "pipe"] });
   child.stdin.on("error", () => {}); // EPIPE if it already exited; reported via the exit code
@@ -227,21 +233,21 @@ async function loginFlow(rt: Runtime, c: any, child: ReturnType<typeof spawn>, e
     child.stderr!.on("data", onData);
     void exited.then(() => { clearTimeout(timer); resolve(undefined); });
   });
-  if (!url) return c.ui.notify(`agy acp --login 没有给出登录链接：\n${output().slice(-500)}`, "error");
-  c.ui.notify(`在浏览器中打开并登录：${url}`, "info");
-  const code = await c.ui.input(`在浏览器打开下面的链接，用 Google 账号登录，把授权码（或最后跳转页面的完整 URL）粘贴到这里：\n\n${url}`, "授权码或回调 URL", { timeout: 600_000 });
-  if (!code?.trim()) return c.ui.notify("已取消登录。", "warning");
+  if (!url) return c.ui.notify(`agy acp --login did not print a login URL:\n${output().slice(-500)}`, "error");
+  c.ui.notify(`Open in a browser and sign in: ${url}`, "info");
+  const code = await c.ui.input(`Open this link, sign in with your Google account, then paste the authorization code (or the full URL of the page you land on):\n\n${url}`, "Authorization code or callback URL", { timeout: 600_000 });
+  if (!code?.trim()) return c.ui.notify("Login cancelled.", "warning");
   child.stdin!.write(code.trim() + "\n");
   let timer: NodeJS.Timeout | undefined;
   const result = await Promise.race([exited, new Promise<"timeout">((r) => { timer = setTimeout(() => r("timeout"), 120_000); })]);
   clearTimeout(timer);
-  if (result === "timeout") return c.ui.notify("等待 agy 完成登录超时。", "error");
-  if (result !== 0) return c.ui.notify(`登录失败（exit ${result}）：\n${output().slice(-500)}`, "error");
+  if (result === "timeout") return c.ui.notify("Timed out waiting for agy to finish logging in.", "error");
+  if (result !== 0) return c.ui.notify(`Login failed (exit ${result}):\n${output().slice(-500)}`, "error");
   await rt.shutdown(); // next start picks up the new credentials
   try {
     await rt.listSessionIds();
-    c.ui.notify("Antigravity 登录成功。", "info");
+    c.ui.notify("Signed in to Antigravity.", "info");
   } catch (err) {
-    c.ui.notify(`登录后验证失败：${err instanceof Error ? err.message : String(err)}`, "error");
+    c.ui.notify(`Login verification failed: ${err instanceof Error ? err.message : String(err)}`, "error");
   }
 }

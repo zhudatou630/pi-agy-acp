@@ -61,6 +61,9 @@ test("real agy 1.5.14 tool shapes map to pi-web friendly mirrors", () => {
   const r = mirrorResult(done);
   assert.equal(r.content[0].text, "total 12\n-rw-r--r-- 1 u u 12 hello.txt\n");
   assert.equal(r.isError, false);
+  // a command agy finished in the background has no timing lines
+  const bg = mirrorResult(mergeToolUpdate(undefined, { toolCallId: "b", kind: "execute", status: "completed", rawOutput: { output: "Command exited with code 0.\n\nCommand output:\nWAKE_DONE\n", exit_code: 0 } }));
+  assert.equal(bg.content[0].text, "WAKE_DONE\n");
   const failed = mirrorResult(mergeToolUpdate(cmd, { toolCallId: "c", status: "completed", rawOutput: { output: "boom", exit_code: 2 } }));
   assert.equal(failed.isError, true);
   const write = mergeToolUpdate(undefined, { toolCallId: "w", name: "write_file", kind: "edit", title: "File hello.txt", status: "in_progress", locations: [{ path: "/w/hello.txt" }], rawInput: { Content: "hi\n", Path: "/w/hello.txt" } });
@@ -95,10 +98,10 @@ test("new input blocks: foreign turns become notes, delivered steers are skipped
     { role: "user", content: [{ type: "text", text: "look" }, { type: "image", mimeType: "image/png", data: "aGk=" }] },
   ], { images: true });
   assert.equal(blocks.length, 2);
-  assert.match((blocks[0] as any).text, /〔中途由 claude\/opus 回答〕\nclaude answer\n\nlook/);
+  assert.match((blocks[0] as any).text, /\[answered in between by claude\/opus\]\nclaude answer\n\nlook/);
   assert.deepEqual(blocks[1], { type: "image", mimeType: "image/png", data: "aGk=" });
   const noImg = inputsToBlocks([{ role: "user", content: [{ type: "image", mimeType: "image/bmp", data: "aGk=" }] }], { images: true });
-  assert.match((noImg[0] as any).text, /不支持的格式/);
+  assert.match((noImg[0] as any).text, /unsupported format/);
   // two identical steers, one already sent: the second still goes out
   const delivered = [inputHash("same")];
   const sent = inputsToBlocks([{ role: "user", content: "same" }, { role: "user", content: "same" }], { images: true, delivered });
@@ -112,10 +115,10 @@ test("history transcript is bounded and keeps the newest messages", () => {
   assert.ok(t.length < 1400);
   assert.match(t, /message 49/);
   assert.doesNotMatch(t, /message 0 /);
-  assert.match(t, /更早的 \d+ 条消息已省略/);
+  assert.match(t, /\d+ earlier messages omitted/);
   // one huge newest message still leaves its tail in the transcript
   const big = historyTranscript([{ role: "user", content: "start" }, { role: "assistant", content: Array.from({ length: 8 }, () => ({ type: "text", text: "y".repeat(8000) })) }], 1000);
-  assert.match(big, /截断/);
+  assert.match(big, /truncated/);
   assert.deepEqual(splitFresh([{ role: "system" }, { role: "user", content: "a" }, ours("x"), { role: "user", content: "b" }]).inputs, [{ role: "user", content: "b" }]);
 });
 

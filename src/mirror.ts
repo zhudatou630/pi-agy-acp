@@ -81,7 +81,8 @@ export function mirrorCall(s: ToolState): { name: string; args: Record<string, a
   return { name: "agy_tool", args };
 }
 
-const COMMAND_PREAMBLE = /^Created At:[^\n]*\n(?:Completed At:[^\n]*\n)?(?:Command exited with code -?\d+\.?\n)?\n?(?:Command output:\n)?/;
+// agy prefixes command output with timing/exit lines (background commands omit the timing)
+const COMMAND_PREAMBLE = /^(?:Created At:[^\n]*\n)?(?:Completed At:[^\n]*\n)?(?:Command exited with code -?\d+\.?\n)?\n?(?:Command output:\n)?/;
 const MAX_RESULT = 20_000;
 
 function textOf(s: ToolState): string {
@@ -94,7 +95,7 @@ function textOf(s: ToolState): string {
 }
 
 function clip(text: string): string {
-  return text.length > MAX_RESULT ? text.slice(0, MAX_RESULT) + `\n…（已截断，共 ${text.length} 字符）` : text;
+  return text.length > MAX_RESULT ? text.slice(0, MAX_RESULT) + `\n… (truncated, ${text.length} chars total)` : text;
 }
 
 export interface MirrorResult {
@@ -108,7 +109,7 @@ export function mirrorResult(s: ToolState): MirrorResult {
   const notes: string[] = [];
   if (s.aborted) return { content: [{ type: "text", text: s.aborted }], details, isError: true };
   if (s.background && s.status !== "completed" && s.status !== "failed") {
-    return { content: [{ type: "text", text: "仍在后台运行（由 agy 管理），结果会在下一次回复开头显示。" }], details, isError: false };
+    return { content: [{ type: "text", text: "Still running in the background (managed by agy)." }], details, isError: false };
   }
   let text = textOf(s);
   let isError = s.status === "failed";
@@ -123,10 +124,10 @@ export function mirrorResult(s: ToolState): MirrorResult {
   } else if (s.kind === "edit") {
     const patch = patchFor(s);
     if (patch) { details.patch = patch.patch; if (!patch.located) details.agy.lineNumbersUnknown = true; }
-    text = text.trim() || (isError ? "编辑失败" : `已修改 ${primaryPath(s) ?? ""}`);
+    text = text.trim() || (isError ? "Edit failed" : `Edited ${primaryPath(s) ?? ""}`);
   } else if (!text.trim()) {
     const p = primaryPath(s);
-    text = isError ? "失败" : s.kind === "read" && p ? `已读取 ${p}` : "完成";
+    text = isError ? "Failed" : s.kind === "read" && p ? `Read ${p}` : "Done";
   }
   if (notes.length) text = `${text}\n${notes.join(" ")}`;
   return { content: [{ type: "text", text: clip(text) }], details, isError };
@@ -180,6 +181,6 @@ export function unifiedDiff(file: string, oldText: string | null, newText: strin
 /** ACP plan entries → markdown checklist. */
 export function planMarkdown(entries: any[]): string {
   return entries
-    .map((e) => `- [${e?.status === "completed" ? "x" : " "}] ${e?.status === "in_progress" ? "**进行中** " : ""}${e?.content || "（未命名步骤）"}`)
+    .map((e) => `- [${e?.status === "completed" ? "x" : " "}] ${e?.status === "in_progress" ? "**in progress** " : ""}${e?.content || "(unnamed step)"}`)
     .join("\n");
 }
