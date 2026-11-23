@@ -641,6 +641,7 @@ export class Runtime {
       turn.pendingPermissions++;
       clearTimeout(turn.wakeTimer); // a reply waiting on the user does not end on silence
       turn.wakeTimer = undefined;
+      turn.stepDone = false; // after the answer agy generates its next step
     }
     try {
       const ctx = s.owner?.ctx();

@@ -211,7 +211,9 @@ function serve() {
         finish("end_turn");
         await sleep(400);
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "need input " } });
+        u({ sessionUpdate: "usage_update", used: 1350, size: 1048576 });
         const res = await ask("session/request_permission", { sessionId, toolCall: { toolCallId: "interaction_9", title: "Pick a color" }, options: [{ optionId: "r", name: "Red", kind: "allow_once" }, { optionId: "b", name: "Blue", kind: "allow_once" }] });
+        await sleep(2500); // generating after the answer, longer than the settle window
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `picked:${res?.outcome?.optionId ?? res?.outcome?.outcome}` } });
         u({ sessionUpdate: "usage_update", used: 1400, size: 1048576 });
         return;
