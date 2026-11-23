@@ -17,7 +17,6 @@ export interface RuntimeConfig {
   extraArgs: string[];
 }
 
-export const REPLAY_MAX_CHARS = 60_000;
 export const CANCEL_WAIT_MS = 10_000;
 const IDLE_SHUTDOWN_MS = 600_000;
 const WATCHDOG_MS = 600_000;
@@ -740,11 +739,15 @@ export class Runtime {
   armIdle(): void {
     this.clearIdle();
     this.idleTimer = setTimeout(() => {
-      const busy = this.starting || this.proc?.busy || [...this.sessions.values()].some((s) => s.turn && !s.turn.ended);
-      if (busy) return this.armIdle();
+      if (this.busy()) return this.armIdle();
       void this.shutdown();
     }, IDLE_SHUTDOWN_MS);
     this.idleTimer.unref();
+  }
+
+  /** Work that keeps agy alive. A broken session's turn (Stop never settled) does not: agy may never end it. */
+  busy(): boolean {
+    return !!this.starting || !!this.proc?.busy || [...this.sessions.values()].some((s) => !s.broken && s.turn && !s.turn.ended);
   }
 
   async shutdown(): Promise<void> {

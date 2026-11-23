@@ -80,9 +80,10 @@ export class AcpProcess {
     return !this.exited;
   }
 
-  /** Requests in flight (setup, resume, prompts). */
+  /** Setup requests in flight (new, resume, config). Prompts are tracked by their turns: one given up may never return. */
   get busy(): boolean {
-    return this.pending.size > 0;
+    for (const p of this.pending.values()) if (p.method !== "session/prompt") return true;
+    return false;
   }
 
   request<T = any>(method: string, params: unknown, timeoutMs?: number): Promise<T> {

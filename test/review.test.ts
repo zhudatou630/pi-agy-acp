@@ -75,6 +75,20 @@ test("/agy new while agy is working ends the turn instead of hanging", async () 
   assert.notEqual(assistants(session).at(-1).stopReason, "stop");
 });
 
+test("a prompt agy never answers after Stop does not keep agy from idle shutdown", { timeout: 20_000 }, async () => {
+  const { session } = await createSession(env);
+  const run = session.prompt("SCRIPT:hang");
+  await until(() => promptsWith("SCRIPT:hang").length === 1, 5000);
+  await sleep(200);
+  await session.abort();
+  await run; // gives up after CANCEL_WAIT_MS
+  const rt = runtime();
+  assert.equal(assistants(session).at(-1).stopReason, "aborted");
+  assert.equal(rt.busy(), false, "the abandoned prompt must not hold the process");
+  await session.prompt("after hang");
+  assert.match(lastText(session), /echo\[.*\]: after hang/, "the broken session is replaced and works");
+});
+
 test("agy max_tokens maps to pi length", async () => {
   const { session } = await createSession(env);
   await session.prompt("SCRIPT:maxtokens");

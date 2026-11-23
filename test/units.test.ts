@@ -8,7 +8,7 @@ import { inputHash, matchBinding, newInputs, splitFresh, type BindingFile } from
 import { mapThinkingLevel, toPiModels, SEED_CATALOG } from "../src/catalog.ts";
 import { redact } from "../src/debug.ts";
 import { mergeToolUpdate, mirrorCall, mirrorResult, unifiedDiff } from "../src/mirror.ts";
-import { historyTranscript, inputsToBlocks } from "../src/replay.ts";
+import { historyTranscript, inputsToBlocks, REPLAY_MAX_CHARS } from "../src/replay.ts";
 
 test("thinking level mapping clamps to what the model offers", () => {
   const flash = ["low", "medium", "high"];
@@ -117,6 +117,16 @@ test("new input blocks: foreign turns become notes, delivered steers are skipped
   const sent = inputsToBlocks([{ role: "user", content: "same" }, { role: "user", content: "same" }], { images: true, delivered });
   assert.deepEqual(sent, [{ type: "text", text: "same" }]);
   assert.deepEqual(delivered, []);
+});
+
+test("notes on other models' turns share the replay budget, newest kept", () => {
+  const foreign = Array.from({ length: 40 }, (_, i) => ({ role: "assistant", provider: "claude", model: "opus", content: [{ type: "text", text: `turn${i} ` + "y".repeat(3000) }] }));
+  const [block] = inputsToBlocks([...foreign, { role: "user", content: "back to agy" }], { images: true }) as any[];
+  assert.ok(block.text.length <= REPLAY_MAX_CHARS + 200, String(block.text.length));
+  assert.ok(block.text.startsWith("[earlier output from other models omitted]"));
+  assert.match(block.text, /turn39 /);
+  assert.doesNotMatch(block.text, /turn0 /);
+  assert.ok(block.text.endsWith("back to agy"));
 });
 
 test("history transcript is bounded and keeps the newest messages", () => {

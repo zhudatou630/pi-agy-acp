@@ -27,7 +27,7 @@
 ```
 
 - 没有 `sessionCapabilities.fork`。实际调用 `session/fork` 返回 `-32601 Method not found`。
-- 冷启动 initialize 大约 90 ms；`session/new` 大约 2.3–3.2 s。
+- 冷启动 initialize 大约 90 ms。**每个进程的第一个会话类请求**（new、list、resume 都一样）要 2.3–2.8 s，这是 agy 收到请求后才做的一次性预热，initialize 后空等几秒也不会提前完成。之后 `session/new` 约 36 ms（两个并发约 85 ms），`set_config_option` 约 1 ms，`session/list` 约 25 ms，`session/resume` 约 2 ms。所以冷启动的代价在进程，不在会话数。
 - 单进程常驻内存约 230 MB。空闲时没有子进程，也不会拉起 `language_server`，和正在运行的 `~/.antigravity-hub-server` 进程树没有交集。
 - stdin 收到 EOF 后，agy 自己以 exit 0 退出。SIGTERM 发给进程组也能干净退出。
 - 运行期间 stderr 没有任何输出，stdout 全是 JSON-RPC。日志写在 `~/.gemini/antigravity-cli/log/acp-server-*.log`。
@@ -115,7 +115,7 @@ prompt 里放 `{"type":"image","mimeType":"image/png","data":"<base64>"}`，模�
 ## 6. session/load、resume、list、close
 
 - `session/load`：**在返回结果之前**，先用 `session/update` 把整段历史回放一遍（user_message_chunk、已完成的 tool_call、thought、agent_message_chunk），然后才回 result。客户端在 load 期间必须把这些回放和实时输出隔离开。
-- `session/resume`：不回放历史，2–2.6 s，只推 `session_info_update`。适合冷启动接回会话。
+- `session/resume`：不回放历史，只推 `session_info_update`；耗时见 §1（进程已预热时约 2 ms）。适合冷启动接回会话。
 - **用一个不存在的 sessionId 调 load 也会成功**（空会话，不报错），换一个 cwd 去 load 同样成功。所以不能靠报错判断会话是否丢失，必须先用 `session/list` 确认会话还在（list 会返回所有 cwd 下的会话，带 title 和 updatedAt）。
 - `session/close` 返回 `{}`。
 

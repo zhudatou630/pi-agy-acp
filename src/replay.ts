@@ -6,6 +6,8 @@ export type AcpBlock = { type: "text"; text: string } | { type: "image"; mimeTyp
 const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const TOOL_SNIPPET = 600;
+/** Budget for the history transcript, and for notes on other models' turns in one prompt. */
+export const REPLAY_MAX_CHARS = 60_000;
 
 function contentParts(content: unknown): any[] {
   return typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content : [];
@@ -20,6 +22,8 @@ export function userText(msg: any): string {
  * immediate steer is skipped once per entry in `delivered` (the entry is consumed).
  */
 export function inputsToBlocks(inputs: any[], opts: { images: boolean; delivered?: string[] }): AcpBlock[] {
+  const notes = foreignNotes(inputs);
+  let omitted = false;
   const blocks: AcpBlock[] = [];
   for (const m of inputs) {
     if (m.role === "user") {
@@ -32,12 +36,32 @@ export function inputsToBlocks(inputs: any[], opts: { images: boolean; delivered
         if (p.type === "text" && p.text) blocks.push({ type: "text", text: p.text });
         else if (p.type === "image") blocks.push(imageBlock(p, opts.images));
       }
-    } else {
-      const note = noteFor(m);
+    } else if (notes.has(m)) {
+      const note = notes.get(m);
       if (note) blocks.push({ type: "text", text: note });
+      else if (!omitted) {
+        omitted = true;
+        blocks.push({ type: "text", text: "[earlier output from other models omitted]" });
+      }
     }
   }
   return mergeText(blocks);
+}
+
+/** Notes for other models' turns, newest first within the budget; older ones map to undefined. */
+function foreignNotes(inputs: any[]): Map<any, string | undefined> {
+  const out = new Map<any, string | undefined>();
+  let left = REPLAY_MAX_CHARS;
+  for (let i = inputs.length - 1; i >= 0; i--) {
+    const m = inputs[i];
+    if (m.role === "user") continue;
+    const note = noteFor(m);
+    if (!note) continue;
+    const fits = note.length <= left;
+    left = fits ? left - note.length : 0;
+    out.set(m, fits ? note : undefined);
+  }
+  return out;
 }
 
 function imageBlock(p: any, supported: boolean): AcpBlock {

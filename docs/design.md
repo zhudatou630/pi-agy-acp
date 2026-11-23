@@ -105,7 +105,7 @@ sequenceDiagram
 3. 锚点之后的消息就是“新输入”：
    - 跳过本 binding 发起的镜像 toolResult。
    - user 消息转成 ACP 内容块。
-   - 其他模型的 assistant 消息、toolResult 转成简短的文字说明，例如“〔中途由 claude-opus 回答：…〕”。这样用户中途换成 Claude 回答一轮，再切回 agy 时，agy 也能知道发生了什么。
+   - 其他模型的 assistant 消息、toolResult 转成简短的文字说明，例如“〔中途由 claude-opus 回答：…〕”。这样用户中途换成 Claude 回答一轮，再切回 agy 时，agy 也能知道发生了什么。这些说明合计不超过 replay 的 6 万字符上限，优先保留最新的，更早的部分换成一句省略提示。
    - 已经在 `delivered` 里的用户输入不再重复发送。
 
 这套规则覆盖的情况：
@@ -256,7 +256,7 @@ sequenceDiagram
 - **复用**：整个 pi 进程共用一个 agy 进程（挂在 `globalThis` 上），多个会话靠 sessionId 复用它。`initialize` 只做一次，结果缓存下来。model、thought_level 和 mode 都是**按 ACP 会话**设置的，所以不同的 pi 会话可以同时用不同的模型并行工作（已实测，见 D2）。
 - **崩溃**：进程 `exit` 时，所有 pending RPC 都 reject；正在进行的 turn 结束为 `error`，提示“agy 进程退出（code/signal），下次发送会自动重启并接回会话”；所有 binding 标记为需要 resume。**不自动重发**那条 prompt，因为它可能已经产生了副作用。下一次请求时再重新拉起进程。
 - **卡死保护**：一个 turn 在 10 分钟内没有任何事件，且没有正在进行的工具或待处理的权限请求时，判定为卡死：发 cancel，并以 error 结束。
-- **空闲退出**：没有活动 turn、超过 10 分钟既没有请求也没有 agy 的 `session/update` 时（agy 主动工作期间不会被回收），先 `session/close` 关闭所有会话，再结束进程。
+- **空闲退出**：没有活动 turn（已判定 broken 的会话不算，agy 可能永远不回它的 prompt）、超过 10 分钟既没有请求也没有 agy 的 `session/update` 时（agy 主动工作期间不会被回收），先 `session/close` 关闭所有会话，再结束进程。
 - **退出清理**：
   - 正常路径：`session_shutdown`（最后一个实例退出时）→ 关闭会话 → 关闭 stdin → 对进程组发 `SIGTERM`（`kill(-pgid)`）→ 2 秒后还在就 `SIGKILL`。
   - 兜底：在 `process.on("exit")` 里同步执行 `kill(-pgid, SIGTERM)`。

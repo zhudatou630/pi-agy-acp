@@ -267,6 +267,10 @@ function serve() {
         u({ sessionUpdate: "plan", entries: [{ content: "step one", status: "completed" }, { content: "step two", status: "in_progress" }] });
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "planned" } });
         return finish("end_turn");
+      case "hang":
+        // a stuck agy: ignores session/cancel and never answers this prompt
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "stuck " } });
+        return;
       case "crash":
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "about to crash" } });
         await sleep(50);
@@ -331,6 +335,7 @@ function serve() {
         return reply(setup(p.sessionId));
       case "session/close":
         sessions.delete(p.sessionId);
+        running.delete(p.sessionId); // a closed session's work (even a stuck prompt) is gone
         return reply({});
       case "session/set_config_option": {
         const s = sessions.get(p.sessionId);
