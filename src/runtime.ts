@@ -8,7 +8,7 @@ import { type Catalog, loadCatalog, mapThinkingLevel, saveCatalog } from "./cata
 import { DebugLog } from "./debug.ts";
 import { isTerminal, mergeToolUpdate, type ToolState } from "./mirror.ts";
 
-export const VERSION = "0.2.2";
+export const VERSION = "0.2.3";
 
 /** ~/.pi/agent/pi-agy-acp/config.json */
 export interface RuntimeConfig {
@@ -23,9 +23,11 @@ const IDLE_SHUTDOWN_MS = 600_000;
 const WATCHDOG_MS = 600_000;
 /** After a background command finishes, how long agy may take to start its own report. */
 const WAKE_GRACE_MS = 20_000;
-/** While agy works on its own, how much silence ends the reply (it sends no prompt response).
- *  agy often thinks silently for several seconds between steps of its own multi-step work. */
-const WAKE_QUIET_MS = 15_000;
+/** agy ends every model call with usage_update, followed at once by that call's tool calls, if any.
+ *  When nothing follows for this long, agy's own work is over (it sends no prompt response). */
+const WAKE_SETTLE_MS = 2_000;
+/** Fallback when agy goes quiet without a closing usage_update. It can generate silently for minutes. */
+const WAKE_QUIET_MS = 120_000;
 
 export class AuthRequiredError extends Error {
   constructor() {
@@ -124,6 +126,8 @@ export class Turn {
   awaitingWake = false;
   /** agy has started its own report. */
   woke = false;
+  /** During its own report, agy's last model call ended (usage_update) and nothing followed yet. */
+  stepDone = false;
   endResult: any;
   wakeTimer: NodeJS.Timeout | undefined;
   readonly abort = new AbortController();
@@ -448,6 +452,7 @@ export class Runtime {
     turn.lastActivity = Date.now();
     turn.awaitingWake = false; // a prompt is in flight again (steer)
     turn.woke = false;
+    turn.stepDone = false;
     clearTimeout(turn.wakeTimer);
     s.stopped = false;
     proc.request("session/prompt", { sessionId: s.id, prompt: blocks }).then(
@@ -514,7 +519,8 @@ export class Runtime {
     clearTimeout(turn.wakeTimer);
     turn.wakeTimer = undefined;
     if (turn.pendingPermissions > 0 || [...s.tools.values()].some((t) => !isTerminal(t))) return;
-    turn.wakeTimer = setTimeout(() => this.finishTurn(s, turn, { result: turn.endResult }), turn.woke ? WAKE_QUIET_MS : WAKE_GRACE_MS);
+    const wait = !turn.woke ? WAKE_GRACE_MS : turn.stepDone ? WAKE_SETTLE_MS : WAKE_QUIET_MS;
+    turn.wakeTimer = setTimeout(() => this.finishTurn(s, turn, { result: turn.endResult }), wait);
   }
 
   cancel(s: AcpSession): void {
@@ -568,6 +574,8 @@ export class Runtime {
     if (turn) {
       turn.lastActivity = Date.now();
       if (speaks && turn.awaitingWake) turn.woke = true;
+      if (u.sessionUpdate === "usage_update") turn.stepDone = turn.woke;
+      else if (speaks) turn.stepDone = false;
     }
     switch (u.sessionUpdate) {
       case "tool_call":

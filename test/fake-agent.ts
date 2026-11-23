@@ -159,8 +159,12 @@ function serve() {
         finish("end_turn");
         await sleep(300);
         u({ sessionUpdate: "tool_call_update", ...cmd, status: "completed", rawOutput: { output: "ok", exit_code: 0 } });
+        // like agy 1.5.14: each model call ends with usage_update, then at once its tool calls
         u({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "step one" } });
-        await sleep(4000);
+        u({ sessionUpdate: "usage_update", used: 1400, size: 1048576 });
+        u({ sessionUpdate: "tool_call", toolCallId: "bgs-w", kind: "edit", title: "File notes.md", status: "in_progress", rawInput: { Path: "notes.md", Content: "x" } });
+        u({ sessionUpdate: "tool_call_update", toolCallId: "bgs-w", status: "completed" });
+        await sleep(4000); // generating the next step silently
         u({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "step two" } });
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "all steps done" } });
         u({ sessionUpdate: "usage_update", used: 1500, size: 1048576 });
@@ -196,7 +200,11 @@ function serve() {
         finish("end_turn");
         await sleep(400);
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "restarting watcher " } });
+        u({ sessionUpdate: "usage_update", used: 1400, size: 1048576 });
         u({ sessionUpdate: "tool_call", toolCallId: "wd2", kind: "execute", title: "npm run watch", status: "in_progress", rawInput: { CommandLine: "npm run watch", IsDaemon: true } });
+        await sleep(200);
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "watcher up" } });
+        u({ sessionUpdate: "usage_update", used: 1450, size: 1048576 });
         return;
       case "wakequestion": {
         u({ sessionUpdate: "tool_call", toolCallId: "wq", kind: "execute", title: "npm run dev", status: "in_progress", rawInput: { CommandLine: "npm run dev", IsDaemon: true } });
@@ -205,6 +213,7 @@ function serve() {
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "need input " } });
         const res = await ask("session/request_permission", { sessionId, toolCall: { toolCallId: "interaction_9", title: "Pick a color" }, options: [{ optionId: "r", name: "Red", kind: "allow_once" }, { optionId: "b", name: "Blue", kind: "allow_once" }] });
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `picked:${res?.outcome?.optionId ?? res?.outcome?.outcome}` } });
+        u({ sessionUpdate: "usage_update", used: 1400, size: 1048576 });
         return;
       }
       case "schedtitle": {
@@ -214,6 +223,7 @@ function serve() {
         await sleep(300);
         u({ sessionUpdate: "tool_call_update", ...t, status: "completed", rawOutput: { output: "3 passed", exit_code: 0 } });
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "tests pass" } });
+        u({ sessionUpdate: "usage_update", used: 1400, size: 1048576 });
         return;
       }
       case "daemon":

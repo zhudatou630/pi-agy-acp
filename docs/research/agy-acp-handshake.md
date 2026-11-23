@@ -133,6 +133,8 @@ prompt 里放 `{"type":"image","mimeType":"image/png","data":"<base64>"}`，模�
 
 后续实测（`sleep 20 && echo WAKE_DONE`，tool_call 里带 `IsDaemon:false, WaitMsBeforeAsync:500`）：prompt 在 9.6 s 以 `end_turn` 返回；26 s 时工具更新为 completed；随后 agy **在没有任何 prompt 的情况下主动发出** agent_message_chunk（"The background task has finished… WAKE_DONE"），最后发一条 `usage_update`。这段主动汇报没有对应的 prompt 响应。
 
+多步主动工作（agy 1.5.14，`probe/s9.json`：后台命令结束后读文件、写文件、跑命令、再回复）：命令结束约 6 s 后 agy 开口，没有 prompt 响应。**每次模型调用都以一条 `usage_update` 收尾，这次调用的 tool_call 紧随其后（同一毫秒级）**；最后一次调用只有正文，之后的 `usage_update` 后面什么都不再来。prompt 内的多步工作形状相同，最后的 `usage_update` 紧挨着 prompt 结果。所以 `usage_update` 不是“整段结束”的唯一信号，但“`usage_update` 之后短时间内没有新的 tool_call 或正文”就是结束。模型生成期间（usage_update 之前）可能长时间完全静默。
+
 ## 10. slash 命令
 
 `session/prompt` 里直接发文本 `/compact` 就能生效：没有任何 update，只回 end_turn 和 usage。

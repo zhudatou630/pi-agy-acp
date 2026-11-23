@@ -1,0 +1,9 @@
+[
+ {"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"pi-agy-acp-probe","version":"0.0.0"}}},
+ {"method":"session/new","params":{"cwd":"/tmp/agy-probe/ws","mcpServers":[]}},
+ {"method":"session/set_config_option","params":{"sessionId":"$SID","configId":"model","value":"gemini-3.8-flash"}},
+ {"method":"session/set_config_option","params":{"sessionId":"$SID","configId":"thought_level","value":"low"}},
+ {"method":"session/prompt","params":{"sessionId":"$SID","prompt":[{"type":"text","text":"Step A: create a.txt containing 'one', then run `cat a.txt`, then create b.txt containing 'two'. Reply 'A done'."}]},"timeout":180000},
+ {"method":"session/prompt","params":{"sessionId":"$SID","prompt":[{"type":"text","text":"Run the command `sleep 15 && echo DONE > done.txt` in the background (set WaitMsBeforeAsync to 500 so it does not block) and end your turn right away saying 'started'. When it finishes, without waiting for me: read done.txt, then write report.md containing a 300-word essay about tides, then run `wc -w report.md`, then reply with the word count."}]},"timeout":180000},
+ {"sleep":150000}
+]

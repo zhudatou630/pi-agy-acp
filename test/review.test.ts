@@ -107,7 +107,7 @@ test("a daemon started during agy's own report does not hold that reply open", a
   const { session } = await createSession(env);
   await session.prompt("SCRIPT:wakedaemon");
   await until(() => session.messages.some((m: any) => m.role === "custom" && m.customType === "agy-wake"), 5000);
-  await until(() => !session.isStreaming && session.messages.some((m: any) => m.role === "toolResult" && m.toolCallId === "wd2"), 25000);
+  await until(() => !session.isStreaming && session.messages.some((m: any) => m.role === "toolResult" && m.toolCallId === "wd2"), 10000);
   const card = session.messages.find((m: any) => m.role === "toolResult" && m.toolCallId === "wd2");
   assert.match(card.content[0].text, /Still running in the background/);
 });
@@ -122,7 +122,7 @@ test("a question during agy's own report waits for the user instead of ending on
     return options.find((o) => o === "Blue");
   }) as any;
   await session.prompt("SCRIPT:wakequestion");
-  await until(() => !session.isStreaming && session.messages.some((m: any) => m.role === "assistant" && JSON.stringify(m.content).includes("picked:b")), 30000);
+  await until(() => !session.isStreaming && session.messages.some((m: any) => m.role === "assistant" && JSON.stringify(m.content).includes("picked:b")), 10000);
   assert.equal(silenceTimerWhileAsking, undefined, "no silence timer runs while agy waits on the user");
   // the answer belongs to the same reply: the question did not end it on silence
   assert.equal(session.messages.filter((m: any) => m.role === "custom" && m.customType === "agy-wake").length, 1);
@@ -140,6 +140,7 @@ test("agy's own multi-step work after a background command stays one reply and k
   } finally {
     rt.armIdle = orig;
   }
+  assert.ok(Date.now() - t0 < 10_000, "agy's closing usage_update ends the reply soon, not the silence fallback");
   assert.ok(!session.messages.some((m: any) => m.role === "custom" && m.customType === "agy-wake"), "a silent step must not split the work into wake replies");
   assert.match(lastText(session), /all steps done/);
   assert.ok(armed.some((t) => t - t0 > 3500), "agy's unprompted updates push idle shutdown back");

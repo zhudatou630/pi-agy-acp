@@ -155,7 +155,7 @@ test("daemon command does not hold the reply; agy speaking later opens a reply b
   await session.prompt("SCRIPT:daemon");
   const card = session.messages.find((m: any) => m.role === "toolResult" && m.toolCallId === "dm");
   assert.match(card.content[0].text, /Still running in the background/);
-  await until(() => !session.isStreaming && session.messages.some((m: any) => m.role === "assistant" && JSON.stringify(m.content).includes("daemon says hi")), 25000);
+  await until(() => !session.isStreaming && session.messages.some((m: any) => m.role === "assistant" && JSON.stringify(m.content).includes("daemon says hi")), 8000);
   assert.ok(session.messages.some((m: any) => m.role === "custom" && m.customType === "agy-wake"));
   assert.ok(!env.prompts().some((p) => JSON.stringify(p.params.prompt).includes("Background task update")), "the marker never reaches agy");
 });
