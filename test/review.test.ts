@@ -114,9 +114,16 @@ test("a daemon started during agy's own report does not hold that reply open", a
 
 test("a question during agy's own report waits for the user instead of ending on silence", async () => {
   const { session, mock } = await createSession(env);
-  mock.answers.select = (async (options: string[]) => { await sleep(4000); return options.find((o) => o === "Blue"); }) as any;
+  let silenceTimerWhileAsking: unknown = "unchecked";
+  mock.answers.select = (async (options: string[]) => {
+    // a real wait would have to outlast WAKE_QUIET_MS; check the silence timer is off instead
+    const turn = [...runtime().sessions.values()].map((s: any) => s.activeTurn).find((t: any) => t?.pendingPermissions > 0);
+    silenceTimerWhileAsking = turn ? turn.wakeTimer : "no waiting turn";
+    return options.find((o) => o === "Blue");
+  }) as any;
   await session.prompt("SCRIPT:wakequestion");
   await until(() => !session.isStreaming && session.messages.some((m: any) => m.role === "assistant" && JSON.stringify(m.content).includes("picked:b")), 30000);
+  assert.equal(silenceTimerWhileAsking, undefined, "no silence timer runs while agy waits on the user");
   // the answer belongs to the same reply: the question did not end it on silence
   assert.equal(session.messages.filter((m: any) => m.role === "custom" && m.customType === "agy-wake").length, 1);
 });

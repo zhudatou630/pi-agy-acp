@@ -632,6 +632,7 @@ export class Runtime {
     if (turn) {
       turn.pendingPermissions++;
       clearTimeout(turn.wakeTimer); // a reply waiting on the user does not end on silence
+      turn.wakeTimer = undefined;
     }
     try {
       const ctx = s.owner?.ctx();
