@@ -18,7 +18,8 @@ export interface RuntimeConfig {
 }
 
 export const CANCEL_WAIT_MS = 10_000;
-const IDLE_SHUTDOWN_MS = 600_000;
+/** Resume after a restart is lossless but pays agy's ~2.5 s warmup; one idle process is ~230 MB. */
+const IDLE_SHUTDOWN_MS = 30 * 60_000;
 const WATCHDOG_MS = 600_000;
 /** After a background command finishes, how long agy may take to start its own report. */
 const WAKE_GRACE_MS = 20_000;
