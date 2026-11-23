@@ -8,7 +8,7 @@ import { type Catalog, loadCatalog, mapThinkingLevel, saveCatalog } from "./cata
 import { DebugLog } from "./debug.ts";
 import { isTerminal, mergeToolUpdate, type ToolState } from "./mirror.ts";
 
-export const VERSION = "0.2.1";
+export const VERSION = "0.2.2";
 
 /** ~/.pi/agent/pi-agy-acp/config.json */
 export interface RuntimeConfig {
@@ -23,8 +23,9 @@ const IDLE_SHUTDOWN_MS = 600_000;
 const WATCHDOG_MS = 600_000;
 /** After a background command finishes, how long agy may take to start its own report. */
 const WAKE_GRACE_MS = 20_000;
-/** While agy reports on its own, how much silence ends the reply (it sends no prompt response). */
-const WAKE_QUIET_MS = 3_000;
+/** While agy works on its own, how much silence ends the reply (it sends no prompt response).
+ *  agy often thinks silently for several seconds between steps of its own multi-step work. */
+const WAKE_QUIET_MS = 15_000;
 
 export class AuthRequiredError extends Error {
   constructor() {
@@ -549,6 +550,7 @@ export class Runtime {
     const s = this.sessions.get(params?.sessionId);
     const u = params?.update;
     if (!u || !s) return;
+    if (!s.ephemeral) this.armIdle(); // agy working on its own (no prompt in flight) is use too
     let turn = s.turn && !s.turn.ended ? s.turn : undefined;
     const speaks = ["agent_message_chunk", "agent_thought_chunk", "plan"].includes(u.sessionUpdate)
       || (u.sessionUpdate === "tool_call" && !s.tools.has(u.toolCallId));

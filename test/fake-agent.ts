@@ -152,6 +152,20 @@ function serve() {
         u({ sessionUpdate: "usage_update", used: 1300, size: 1048576 });
         return;
       }
+      case "bgsteps": {
+        // agy keeps working on its own after a background command, thinking silently between steps
+        const cmd = { toolCallId: "bgs", kind: "execute", title: "sleep 1", rawInput: { CommandLine: "sleep 1", IsDaemon: false } };
+        u({ sessionUpdate: "tool_call", ...cmd, status: "in_progress" });
+        finish("end_turn");
+        await sleep(300);
+        u({ sessionUpdate: "tool_call_update", ...cmd, status: "completed", rawOutput: { output: "ok", exit_code: 0 } });
+        u({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "step one" } });
+        await sleep(4000);
+        u({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "step two" } });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "all steps done" } });
+        u({ sessionUpdate: "usage_update", used: 1500, size: 1048576 });
+        return;
+      }
       case "bglong": {
         const longCmd = { toolCallId: "bgl", kind: "execute", title: "sleep 600", rawInput: { CommandLine: "sleep 600", IsDaemon: false } };
         u({ sessionUpdate: "tool_call", ...longCmd, status: "in_progress" });

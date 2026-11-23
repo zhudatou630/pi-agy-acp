@@ -177,7 +177,7 @@ sequenceDiagram
   - 进程退出时返回错误。
   - pi 中止时发送 `session/cancel`，返回 aborted。
 - **后台命令（v0.4）**：agy 的 `run_command` 超过 `WaitMsBeforeAsync` 后会转到后台，prompt 先以 `end_turn` 返回；命令跑完后，agy 会**不经 prompt 主动汇报**，以若干 chunk 加 `usage_update` 结束（实测见 `docs/research/agy-acp-handshake.md`）。处理方式和 pi 自己的 `bash` 一致：
-  - **非 daemon 命令占住回复**：prompt 返回时如果还有这类命令在跑，turn 不结束，镜像卡片一直显示运行中。命令结束、agy 的汇报流进同一条回复，然后 agy 静默 3 秒即结束（命令结束后 20 秒内 agy 没开口也结束）。期间按停止会发 `session/cancel`（agy 会终止后台命令），并立即结束回复。
+  - **非 daemon 命令占住回复**：prompt 返回时如果还有这类命令在跑，turn 不结束，镜像卡片一直显示运行中。命令结束、agy 的汇报流进同一条回复，然后 agy 静默 15 秒即结束（agy 常在命令结束后自己继续多步工作，步与步之间会静默思考好几秒，太短会把一段工作切成多条回复）（命令结束后 20 秒内 agy 没开口也结束）。期间按停止会发 `session/cancel`（agy 会终止后台命令），并立即结束回复。
   - **daemon 和定时任务不占住回复**。之后 agy 如果主动开口，而 pi 里没有进行中的回复，插件用一条 `agy-wake` 自定义消息触发一轮新回复，把 agy 的话流式显示出来，不需要等用户发下一条消息。这条消息通过 pi 的 `context` 钩子从所有模型请求里剔除（按 customType 判断，不按文字）。pi 正忙时以 follow-up 排队。
   - 用户按了停止之后，agy 再说的话不会自动开新回复，再来的权限请求一律拒绝，直到用户下一次发消息。
   - 在 agy 主动汇报期间新启动的 daemon，也不占住回复；agy 主动提问时，回复会等用户回答，不会因为静默而结束。
@@ -256,7 +256,7 @@ sequenceDiagram
 - **复用**：整个 pi 进程共用一个 agy 进程（挂在 `globalThis` 上），多个会话靠 sessionId 复用它。`initialize` 只做一次，结果缓存下来。model、thought_level 和 mode 都是**按 ACP 会话**设置的，所以不同的 pi 会话可以同时用不同的模型并行工作（已实测，见 D2）。
 - **崩溃**：进程 `exit` 时，所有 pending RPC 都 reject；正在进行的 turn 结束为 `error`，提示“agy 进程退出（code/signal），下次发送会自动重启并接回会话”；所有 binding 标记为需要 resume。**不自动重发**那条 prompt，因为它可能已经产生了副作用。下一次请求时再重新拉起进程。
 - **卡死保护**：一个 turn 在 10 分钟内没有任何事件，且没有正在进行的工具或待处理的权限请求时，判定为卡死：发 cancel，并以 error 结束。
-- **空闲退出**：没有活动 turn、超过 10 分钟没有请求时，先 `session/close` 关闭所有会话，再结束进程。
+- **空闲退出**：没有活动 turn、超过 10 分钟既没有请求也没有 agy 的 `session/update` 时（agy 主动工作期间不会被回收），先 `session/close` 关闭所有会话，再结束进程。
 - **退出清理**：
   - 正常路径：`session_shutdown`（最后一个实例退出时）→ 关闭会话 → 关闭 stdin → 对进程组发 `SIGTERM`（`kill(-pgid)`）→ 2 秒后还在就 `SIGKILL`。
   - 兜底：在 `process.on("exit")` 里同步执行 `kill(-pgid, SIGTERM)`。
