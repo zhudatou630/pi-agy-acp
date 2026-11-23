@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { after, test } from "node:test";
+import { isContextOverflow } from "@earendil-works/pi-ai";
 import { assistants, createSession, lastText, runtime, setupEnv, sleep, until } from "./helpers.ts";
 
 const env = setupEnv("e2e");
@@ -22,7 +23,9 @@ test("text + thinking stream; only the user's text reaches agy", async () => {
   assert.equal(a.stopReason, "stop");
   assert.match(a.responseId, /^agy:/);
   assert.equal(a.usage.totalTokens, 1234, "context usage comes from usage_update, not the cumulative total");
-  assert.deepEqual([a.usage.input, a.usage.cacheRead, a.usage.cacheWrite, a.usage.output], [900, 6000, 50, 34], "token classes are agy's billed totals");
+  // prompt classes are the context size split by agy's billed ratio: pi reads input+cacheRead of one message as one request's prompt
+  assert.deepEqual([a.usage.input, a.usage.cacheRead, a.usage.cacheWrite, a.usage.output], [160, 1065, 9, 34]);
+  assert.equal(isContextOverflow(a, 2000), false, "billed totals across agy's internal calls must not trip pi's silent-overflow check");
   assert.ok(Math.abs(a.usage.cost.total - (900 * 1 + 6000 * 0.1 + 34 * 10) / 1e6) < 1e-12, "cost uses the configured prices");
   const frames = env.frames();
   const init = frames.find((f) => f.method === "initialize");
@@ -60,7 +63,7 @@ test("agy tools become mirror cards with diff and command; permissions are grant
   assert.match(results[2].content[0].text, /^total 0\n/);
   assert.equal(lastText(session), "All done.");
   // the turn is billed once, on its last message
-  assert.deepEqual(assistants(session).map((m: any) => m.usage.input), [0, 0, 0, 900]);
+  assert.deepEqual(assistants(session).map((m: any) => m.usage.input), [0, 0, 0, 160]);
   const perm = env.frames().filter((f) => f.result?.outcome).at(-1);
   assert.deepEqual(perm.result, { outcome: { outcome: "selected", optionId: "allow" } });
   // one ACP turn, one prompt frame, no re-sends during the tool continuations

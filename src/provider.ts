@@ -78,8 +78,9 @@ class Writer {
   done(reason: "stop" | "toolUse" | "length", usage?: Usage): void {
     this.start();
     this.close();
-    // Token classes are agy's billed totals for the whole turn (all internal calls); totalTokens stays the
-    // context size from usage_update, which pi reads for its context estimate.
+    // Cost is priced from agy's billed totals for the whole turn (all internal calls). Token fields then describe
+    // the context: totalTokens = usage_update size, and the prompt classes are scaled to it (keeping the cache ratio),
+    // because pi reads input+cacheRead of one message as a single request (silent-overflow check, context estimate).
     // shortcut: a turn with no usage_update (e.g. agy's own /compact) records nothing, as billed totals alone would pose as context size.
     if (usage?.used) {
       const u = this.msg.usage;
@@ -89,6 +90,13 @@ class Writer {
       u.output = usage.acp?.outputTokens ?? 0; // includes thoughtTokens (measured)
       u.totalTokens = usage.used;
       calculateCost(this.model, u);
+      const prompt = u.input + u.cacheRead + u.cacheWrite;
+      if (prompt > 0) {
+        const k = usage.used / prompt;
+        u.cacheRead = Math.round(u.cacheRead * k);
+        u.cacheWrite = Math.round(u.cacheWrite * k);
+        u.input = usage.used - u.cacheRead - u.cacheWrite;
+      }
     }
     this.msg.stopReason = reason;
     this.stream.push({ type: "done", reason, message: this.msg });
