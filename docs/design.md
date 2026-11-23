@@ -193,7 +193,7 @@ sequenceDiagram
   - 没有 thought_level 的模型：`reasoning: false`。
   - pi 选中某个档位后，`options.reasoning` 会给出 pi 的档位值，provider 用 `set_config_option(thought_level)` 设置；值和缓存一致时不重复发送。
   - 如果 `off: null` 没法排除 off 档，就把 off 映射到 low，并在 README 里说明。
-- **其他字段**：`input: ["text","image"]`；`contextWindow` 用观察到的 `usage_update.size`，默认 1048576；`maxTokens` 设为 65536（仅供 pi 计算用）；`cost` 默认为 0；用户在 `models.json` 的 `modelOverrides` 里填了价格时，按 3.12 计算费用。
+- **其他字段**：`input: ["text","image"]`；`contextWindow` 用观察到的 `usage_update.size`，默认 1048576；`maxTokens` 设为 65536（仅供 pi 计算用）；`cost` 取 pi 内置模型数据里同 id 的 Google / Anthropic 模型的 API 标价（随 pi 版本更新，查不到为 0），只是估算，不是订阅的实际扣费；用户在 `models.json` 的 `modelOverrides` 里填了价格时以用户的为准，按 3.12 计算费用。
 - **auth**：用 `createProvider` 写原生 Provider，`auth.apiKey.resolve` 在找到 agy 可执行文件时返回 `{auth:{}, source:"Antigravity CLI"}`。不需要伪造 key，pi 的模型列表也会把它当作“已配置”。
 
 ### 3.4 图片

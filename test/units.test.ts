@@ -33,6 +33,13 @@ test("pi model defs: levels agy lacks are null, models without levels are not re
   assert.equal(neon.name, "Gemini 4 Neon", "display name is agy's own; the picker groups by provider");
 });
 
+test("pi model defs: prices come from pi's built-in model with the same id, else 0", () => {
+  const models = toPiModels(SEED_CATALOG);
+  assert.ok(models.find((m) => m.id === "gemini-4-neon")!.cost.input > 0);
+  assert.ok(models.find((m) => m.id === "claude-opus-5-5")!.cost.output > 0);
+  assert.deepEqual(models.find((m) => m.id === "gpt-oss-120b-medium")!.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+});
+
 test("unified diff of snippets keeps shared lines as context", () => {
   assert.equal(unifiedDiff("/w/a.txt", "a\nb\nc\n", "a\nB\nc\n", 10), "--- a/w/a.txt\n+++ b/w/a.txt\n@@ -10,3 +10,3 @@\n a\n-b\n+B\n c\n");
   assert.equal(unifiedDiff("/w/n.txt", null, "x\n"), "--- /dev/null\n+++ b/w/n.txt\n@@ -0,0 +1,1 @@\n+x\n");

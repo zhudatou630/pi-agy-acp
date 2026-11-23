@@ -1,6 +1,7 @@
 // Model / effort catalog, cached for offline startup.
 import fs from "node:fs";
 import path from "node:path";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 
 export const PROVIDER_ID = "antigravity";
 export const API_ID = "antigravity-acp";
@@ -56,6 +57,17 @@ export function saveCatalog(file: string, catalog: Catalog): void {
   fs.renameSync(tmp, file);
 }
 
+const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+/** API list price of pi's built-in model with the same id (agy ids match Google/Anthropic ones); 0 when unknown. */
+function builtinCost(id: string) {
+  for (const p of ["google", "anthropic"] as const) {
+    const m = getBuiltinModels(p).find((x) => x.id === id);
+    if (m) return structuredClone(m.cost);
+  }
+  return ZERO_COST;
+}
+
 const PI_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 /** pi model definitions for the provider. */
@@ -73,7 +85,7 @@ export function toPiModels(catalog: Catalog) {
       reasoning,
       ...(reasoning ? { thinkingLevelMap } : {}),
       input: ["text", "image"] as ("text" | "image")[],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      cost: builtinCost(m.id),
       contextWindow: m.contextWindow ?? DEFAULT_CONTEXT,
       maxTokens: 65_536,
     };
