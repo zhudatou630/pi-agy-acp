@@ -94,7 +94,7 @@ class Writer {
       if (prompt > 0) {
         const k = usage.used / prompt;
         u.cacheRead = Math.round(u.cacheRead * k);
-        u.cacheWrite = Math.round(u.cacheWrite * k);
+        u.cacheWrite = Math.min(Math.round(u.cacheWrite * k), usage.used - u.cacheRead); // rounding must not push input negative
         u.input = usage.used - u.cacheRead - u.cacheWrite;
       }
     }
