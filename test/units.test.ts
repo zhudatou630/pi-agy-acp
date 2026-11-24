@@ -134,17 +134,46 @@ test("notes on other models' turns share the replay budget, newest kept", () => 
   assert.ok(block.text.endsWith("back to agy"));
 });
 
-test("history transcript is bounded and keeps the newest messages", () => {
+test("history transcript is bounded: latest exchange, first question, then newest; gaps marked", () => {
   const history = Array.from({ length: 50 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: `message ${i} ` + "x".repeat(100) }));
   const t = historyTranscript(history, 1000);
-  assert.ok(t.length < 1400);
+  assert.ok(t.length <= 1000, String(t.length));
   assert.match(t, /message 49/);
-  assert.doesNotMatch(t, /message 0 /);
-  assert.match(t, /\d+ earlier messages omitted/);
-  // one huge newest message still leaves its tail in the transcript
+  assert.match(t, /message 0 /);
+  assert.doesNotMatch(t, /message 1 /);
+  assert.match(t, /message 0 x+\n\[… part of the conversation omitted here …\]\n/);
+  // one huge message is clipped head and tail instead of dropped
   const big = historyTranscript([{ role: "user", content: "start" }, { role: "assistant", content: Array.from({ length: 8 }, () => ({ type: "text", text: "y".repeat(8000) })) }], 1000);
-  assert.match(big, /truncated/);
+  assert.match(big, /chars omitted/);
+  assert.match(big, /\[user\] start/);
   assert.deepEqual(splitFresh([{ role: "system" }, { role: "user", content: "a" }, ours("x"), { role: "user", content: "b" }]).inputs, [{ role: "user", content: "b" }]);
+});
+
+test("tool activity: one paired line for edits and commands, reads dropped, errors keep their tail", () => {
+  const call = (id: string, name: string, args: any) => ({ type: "toolCall", id, name, arguments: args });
+  const result = (id: string, name: string, text: string, isError = false) => ({ role: "toolResult", toolCallId: id, toolName: name, isError, content: [{ type: "text", text }] });
+  const history = [
+    { role: "user", content: "fix it" },
+    { role: "assistant", content: [{ type: "text", text: "looking" }, call("1", "read", { path: "a.ts" }), call("2", "edit", { path: "a.ts", oldText: "x".repeat(5000), newText: "y" }), call("3", "bash", { command: "npm test" }), call("4", "grep", { pattern: "q" }), call("5", "bash", { command: "sleep 9" })] },
+    result("1", "read", "SECRET FILE BODY"), result("2", "edit", "ok"), result("3", "bash", "noise ".repeat(500) + "\nCommand exited with code 1", true), result("4", "grep", "no such dir", true),
+  ];
+  const t = historyTranscript(history, REPLAY_MAX_CHARS);
+  assert.doesNotMatch(t, /SECRET|read a\.ts|xxxx/);
+  assert.match(t, /\[tool\] edit a\.ts → ok\n/);
+  assert.match(t, /\[tool\] bash npm test → error: .*Command exited with code 1\n/);
+  assert.ok(t.length < 1200, String(t.length));
+  assert.match(t, /\[tool\] grep → error: no such dir/);
+  assert.match(t, /\[tool\] bash sleep 9 → result unknown/);
+  // dialogue outranks tool lines: many tool turns cannot push out the first question
+  const busy = [{ role: "user", content: "the goal" }, ...Array.from({ length: 200 }, (_, i) => ({ role: "assistant", content: [call(`c${i}`, "bash", { command: `step ${i} ` + "z".repeat(150) })] })), { role: "user", content: "next" }];
+  const b = historyTranscript(busy, 5000);
+  assert.match(b, /\[user\] the goal/);
+  assert.match(b, /\[user\] next/);
+  assert.match(b, /step 199 /);
+  assert.doesNotMatch(b, /step 0 /);
+  // a foreign turn's tools are summarized inside its note
+  const [note] = inputsToBlocks([{ role: "assistant", provider: "claude", model: "opus", content: [call("9", "read", { path: "b.ts" }), call("8", "write", { path: "b.ts", content: "..." })] }, result("9", "read", "BODY"), result("8", "write", "done")], { images: true }) as any[];
+  assert.equal(note.text, "[answered in between by claude/opus]\n[tool] write b.ts → ok");
 });
 
 test("debug redaction replaces image bytes", () => {

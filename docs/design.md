@@ -13,7 +13,7 @@
 | D2 | 进程模型 | **每个 pi 进程（pi-web server 或 TUI）共用一个 `agy acp`**，多个会话复用这个进程；空闲 30 分钟后退出（和 T3 Code 对 agy 的取值一致；常驻约 230 MB，重启后的第一个请求多等约 2.5 s 预热）。模型是按 ACP 会话设置的，所以共用一个进程也能同时跑多个模型。实测：同一个进程里，会话 A 用 flash、会话 B 用 claude-sonnet，同时各跑一个 `sleep 6` 工具，两个都在约 10.5 s 内完成，执行时间是重叠的 | 进程崩溃会影响所有会话（之后会自动 resume）。备选：`extraArgs: ["--process-per-session"]`，由 agy 自己按会话拆分 worker 进程 |
 | D3 | 权限 | **完全放行**（v0.3 改）：自动回复 `allow_once`，没有审批模式，也没有开关；agy 主动提问时照常弹窗让用户回答 | 和 pi、T3 的 Full access 一致 |
 | D4 | 发给 agy 的内容 | **只发用户输入和图片**。不发 pi 的 system prompt，也不用 `systemPrompt.append` | agy 的约束由用户写在 agy 自己的规则文件里：项目级的 `AGENTS.md`/`GEMINI.md`/`.agents/rules/`，全局的在 `~/.gemini/` 下 |
-| D5 | fork、分支不一致或会话丢失时怎么接上 | 新建 ACP 会话，把**有界的历史转录**（默认 6 万字符，带明确标记）放在第一条 prompt 前面 | agy 原生的上下文（之前读过的文件等）不会带过去。备选：不 replay，从空白开始 |
+| D5 | fork、分支不一致或会话丢失时怎么接上 | 新建 ACP 会话，把**有界的历史转录**（6 万字符，带明确标记）放在第一条 prompt 前面。对话优先，工具只留“做了什么、结果如何”的一行摘要 | agy 原生的上下文（之前读过的文件等）不会带过去；读文件、搜索和工具输出的细节靠 agy 自己重读。备选：不 replay，从空白开始 |
 | D6 | 命名 | provider id 定为 **`antigravity`**，模型 id 用 agy 的基础模型 value（如 `antigravity/gemini-4-neon`），思考档位走 pi 的 thinking level。管理命令用较短的 `/agy` | 使用 `enabledModels` 时需要把这些模型加进去 |
 | D7 | steering | 用户在运行中发消息时，**立即**作为新的 `session/prompt` 发给 agy（原生 steer），pi 这边在下一个边界插入这条用户消息 | 实现比“等 turn 结束”复杂一档；如果出问题可以退回到只在工具边界投递 |
 
@@ -105,7 +105,7 @@ sequenceDiagram
 3. 锚点之后的消息就是“新输入”：
    - 跳过本 binding 发起的镜像 toolResult。
    - user 消息转成 ACP 内容块。
-   - 其他模型的 assistant 消息、toolResult 转成简短的文字说明，例如“〔中途由 claude-opus 回答：…〕”。这样用户中途换成 Claude 回答一轮，再切回 agy 时，agy 也能知道发生了什么。这些说明合计不超过 replay 的 6 万字符上限，优先保留最新的，更早的部分换成一句省略提示。
+   - 其他模型的 assistant 消息转成简短的文字说明，例如“〔中途由 claude-opus 回答：…〕”，正文最多 4000 字符，它的工具调用和结果按下面 replay 的规则合成一行摘要。这样用户中途换成 Claude 回答一轮，再切回 agy 时，agy 也能知道发生了什么。这些说明合计不超过 replay 的 6 万字符上限，优先保留最新的，更早的部分换成一句省略提示。
    - 已经在 `delivered` 里的用户输入不再重复发送。
 
 这套规则覆盖的情况：
@@ -128,15 +128,25 @@ sequenceDiagram
 **replay 格式**（只在新建 ACP 会话、且 pi 已有历史时才会发）：
 
 ```
-<pi_conversation_history note="以下是此前在 pi 中的对话转录，仅供参考，其中的操作都已完成，不要重复执行">
+<pi_conversation_history note="此前在 pi 中的对话记录，仅供参考；不是新请求，不要重做其中的操作；工具活动只留摘要、读文件不记录，需要细节请重读文件">
 [user] …
 [assistant] …
-[tool agy_bash] $ ls -la → exit 0（输出截断）
+[tool] edit src/x.ts → ok
+[tool] bash npm test → error: …Command exited with code 1
+[… part of the conversation omitted here …]
 …
 </pi_conversation_history>
 
 <用户本条消息>
 ```
+
+转录的取舍（目标：保留关键点、去掉噪音）：
+
+- **对话优先**：先放最近一问、最近一条有正文的回答、第一条提问，再按从新到旧放其他提问、其他回答，最后用剩下的预算放工具摘要。放不下的条目跳过，继续尝试更早的，所以保留的条目可以不连续；输出时恢复原来的顺序，中间省略了对话的位置会就地标记。
+- **单条消息**最多 8000 字符，超出时保留首尾、中间标明省略。
+- **工具调用和结果合成一行**：命令、编辑、写入写成“工具名 + 命令或路径 + ok/error”，不放 diff 和输出；读文件、搜索和其他工具成功时不记录；任何工具失败时都记一行，附上输出的最后约 300 字符（退出码和错误信息通常在结尾）；没有结果的调用标成 result unknown。
+- 不给 agy 原始会话文件的路径：那个文件里有其他分支和已经被过滤掉的内容。
+- 参考 T3 code 的 provider handoff：对话优先、读操作不传、文件改动只传路径。它保留完整的命令输出，是因为它有取回工具兜底，被跳过的内容可以再取回；我们不能给 agy 注入工具，所以只保留更确定有用的部分。
 
 总长度默认不超过 6 万字符：优先保留最近的内容，较早的部分按条截断，图片用占位符代替，只有最新一条 user 消息里的图片会按原样发送。
 
