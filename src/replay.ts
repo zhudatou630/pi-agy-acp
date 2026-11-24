@@ -17,6 +17,7 @@ const ERROR_TAIL = 300;
 // nothing behind that agy cannot re-check, and the answer text carries what mattered.
 const LOGGED_TOOLS = new Set(["bash", "agy_bash", "edit", "write", "agy_edit", "agy_write"]);
 const GAP = "[… part of the conversation omitted here …]";
+const NOTES_GAP = "[output from other models omitted here]";
 const OPEN = `<pi_conversation_history note="Record of the earlier conversation in pi, for reference only. It is not a new request; do not redo what it describes. Tool activity is summarized and file reads are left out: re-read files when you need details.">`;
 const CLOSE = "</pi_conversation_history>";
 
@@ -103,7 +104,7 @@ export function inputsToBlocks(inputs: any[], opts: { images: boolean; delivered
       if (note) { omitted = false; blocks.push({ type: "text", text: note }); }
       else if (!omitted) {
         omitted = true;
-        blocks.push({ type: "text", text: "[output from other models omitted here]" });
+        blocks.push({ type: "text", text: NOTES_GAP });
       }
     }
   }
@@ -152,6 +153,19 @@ function foreignNotes(inputs: any[], history: any[]): Map<any, string | undefine
     kept.set(m, [...(kept.get(m) ?? [header(m)]), ...picked]);
   }
   for (const [m, parts] of kept) out.set(m, parts.join("\n"));
+  // gap markers were not budgeted: drop the oldest kept notes until notes and markers fit
+  const cost = () => {
+    let c = 0;
+    let gap = false;
+    for (const m of inputs) {
+      if (m.role === "user") gap = false;
+      else if (out.get(m)) { c += out.get(m)!.length + 2; gap = false; }
+      else if (out.has(m) && !gap) { c += NOTES_GAP.length + 2; gap = true; }
+    }
+    return c;
+  };
+  const oldestKept = inputs.filter((m) => out.get(m));
+  while (oldestKept.length && cost() > REPLAY_MAX_CHARS) out.set(oldestKept.shift(), undefined);
   return out;
 }
 

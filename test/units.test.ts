@@ -215,6 +215,11 @@ test("replay edge cases: cut mid tool loop, background and exit codes, note budg
   const short = (t: string) => claude([{ type: "text", text: t }]);
   const gaps = inputsToBlocks([long(), { role: "user", content: "q0" }, short("s1"), long(), { role: "user", content: "q1" }, short("s2"), long(), { role: "user", content: "q2" }, ...Array.from({ length: 14 }, long), { role: "user", content: "go" }], { images: true }) as any[];
   assert.equal(gaps[0].text.match(/omitted here/g)?.length, 3);
+  // markers count against the budget too: hundreds of alternating turns stay within it
+  const many = Array.from({ length: 379 }, (_, i) => [{ role: "user", content: `q${i}` }, short("a".repeat(4000))]).flat();
+  const [mb] = inputsToBlocks(many, { images: true }) as any[];
+  const userChars = many.filter((m: any) => m.role === "user").reduce((s: number, m: any) => s + m.content.length + 2, 0);
+  assert.ok(mb.text.length - userChars <= REPLAY_MAX_CHARS, String(mb.text.length - userChars));
   assert.match(gaps[0].text, /omitted here\]\n\nq0\n\n[^\n]+\ns1\n\n\[output from other models omitted here\]\n\nq1/);
   assert.match(plan, /\[plan\]\n- \[x\] step one\n- \[ \] \*\*in progress\*\* step two/);
 });
