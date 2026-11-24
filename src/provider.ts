@@ -177,7 +177,7 @@ async function run(inst: Instance, model: Model<any>, messages: any[], options: 
     }
     if (!turn) {
       if (!blocks.length) return finish(rt, file, b!, writer, "stop"); // nothing new for agy
-      const transcript = history.length ? historyTranscript(history, REPLAY_MAX_CHARS, inputs) : "";
+      const transcript = history.length ? historyTranscript(history, REPLAY_MAX_CHARS, messages) : "";
       const prompt: AcpBlock[] = transcript ? [{ type: "text", text: transcript }, ...blocks] : blocks;
       const key = inputHash(JSON.stringify(prompt));
       if (b!.failedKey === key) {
@@ -332,7 +332,7 @@ async function runEphemeral(rt: Runtime, model: Model<any>, messages: any[], opt
     await rt.applyConfig(session, { model: model.id, piLevel: (options as any).reasoning });
     const { history, inputs } = splitFresh(messages);
     const blocks = inputsToBlocks(inputs, { images: rt.supportsImages, history });
-    const transcript = historyTranscript(history, REPLAY_MAX_CHARS, inputs);
+    const transcript = historyTranscript(history, REPLAY_MAX_CHARS, messages);
     const prompt: AcpBlock[] = transcript ? [{ type: "text", text: transcript }, ...blocks] : blocks;
     const payload = await applyPayloadHook(options, { sessionId: session.id, prompt }, model);
     if (signal?.aborted) return writer.fail("aborted", "Cancelled");

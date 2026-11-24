@@ -128,7 +128,7 @@ test("notes on other models' turns share the replay budget, newest kept", () => 
   const foreign = Array.from({ length: 40 }, (_, i) => ({ role: "assistant", provider: "claude", model: "opus", content: [{ type: "text", text: `turn${i} ` + "y".repeat(3000) }] }));
   const [block] = inputsToBlocks([...foreign, { role: "user", content: "back to agy" }], { images: true }) as any[];
   assert.ok(block.text.length <= REPLAY_MAX_CHARS + 200, String(block.text.length));
-  assert.ok(block.text.startsWith("[earlier output from other models omitted]"));
+  assert.ok(block.text.startsWith("[output from other models omitted here]"));
   assert.match(block.text, /turn39 /);
   assert.doesNotMatch(block.text, /turn0 /);
   assert.ok(block.text.endsWith("back to agy"));
@@ -205,6 +205,17 @@ test("replay edge cases: cut mid tool loop, background and exit codes, note budg
     { role: "assistant", content: [call("p1", "agy_todo", {})] }, result("p1", "agy_todo", "- [ ] step one\n- [ ] step two"),
     { role: "assistant", content: [call("p2", "agy_todo", {})] }, result("p2", "agy_todo", "- [x] step one\n- [ ] **in progress** step two")], REPLAY_MAX_CHARS);
   assert.equal(plan.match(/\[plan\]/g)?.length, 1);
+  // the plan comes from the call's entries, so a failed mirror result does not replace it
+  const fromArgs = historyTranscript([{ role: "user", content: "do it" },
+    { role: "assistant", content: [call("p3", "agy_todo", { entries: [{ content: "ship", status: "in_progress" }] })] }, result("p3", "agy_todo", "No state for this agy tool call", true)], REPLAY_MAX_CHARS);
+  assert.match(fromArgs, /\[plan\]\n- \[ \] \*\*in progress\*\* ship/);
+  assert.doesNotMatch(fromArgs, /No state/);
+  // every run of dropped notes gets its own marker
+  const long = () => claude([{ type: "text", text: "L".repeat(5000) }]);
+  const short = (t: string) => claude([{ type: "text", text: t }]);
+  const gaps = inputsToBlocks([long(), { role: "user", content: "q0" }, short("s1"), long(), { role: "user", content: "q1" }, short("s2"), long(), { role: "user", content: "q2" }, ...Array.from({ length: 14 }, long), { role: "user", content: "go" }], { images: true }) as any[];
+  assert.equal(gaps[0].text.match(/omitted here/g)?.length, 3);
+  assert.match(gaps[0].text, /omitted here\]\n\nq0\n\n[^\n]+\ns1\n\n\[output from other models omitted here\]\n\nq1/);
   assert.match(plan, /\[plan\]\n- \[x\] step one\n- \[ \] \*\*in progress\*\* step two/);
 });
 

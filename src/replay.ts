@@ -1,5 +1,6 @@
 // pi messages → ACP prompt content: user input blocks, other-model notes, bounded history transcript.
 import { inputHash } from "./bindings.ts";
+import { planMarkdown } from "./mirror.ts";
 
 export type AcpBlock = { type: "text"; text: string } | { type: "image"; mimeType: string; data: string };
 
@@ -91,16 +92,18 @@ export function inputsToBlocks(inputs: any[], opts: { images: boolean; delivered
         opts.delivered!.splice(at, 1);
         continue;
       }
+      omitted = false;
       for (const p of contentParts(m.content)) {
         if (p.type === "text" && p.text) blocks.push({ type: "text", text: p.text });
         else if (p.type === "image") blocks.push(imageBlock(p, opts.images));
       }
     } else if (notes.has(m)) {
       const note = notes.get(m);
-      if (note) blocks.push({ type: "text", text: note });
+      // one marker per run of dropped notes
+      if (note) { omitted = false; blocks.push({ type: "text", text: note }); }
       else if (!omitted) {
         omitted = true;
-        blocks.push({ type: "text", text: "[earlier output from other models omitted]" });
+        blocks.push({ type: "text", text: "[output from other models omitted here]" });
       }
     }
   }
@@ -186,7 +189,8 @@ function transcriptItems(history: any[], later: any[], perMessage: number): Item
       for (const line of toolLines(m, results)) items.push({ kind: "tool", text: line });
       // agy's plan lives only in agy_todo; keep the latest one as text
       for (const c of toolCalls(m).filter((c) => c.name === "agy_todo")) {
-        const md = userText(results.get(c.id) ?? {}).trim();
+        const r = results.get(c.id);
+        const md = (Array.isArray(c.arguments?.entries) ? planMarkdown(c.arguments.entries) : r && !r.isError ? userText(r) : "").trim();
         if (!md) continue;
         if (plan) items.splice(items.indexOf(plan), 1);
         plan = { kind: "answer", text: `[plan]\n${headTail(md, perMessage)}` };
@@ -214,7 +218,7 @@ function render(items: Item[], picked: Set<number>): string {
  * Bounded transcript; returns "" when there is nothing to send. Dialogue goes first (latest question and
  * answer, the first question, other questions, other answers, newest first), tool lines get what is
  * left; an item that does not fit is skipped. Output keeps the original order and marks dialogue gaps.
- * `later` are the messages after `history`, only used to find results of its last tool calls.
+ * `later`: messages that may hold results of its last tool calls (e.g. the whole context).
  */
 export function historyTranscript(history: any[], maxChars: number, later: any[] = []): string {
   const items = transcriptItems(history, later, Math.min(MESSAGE_MAX, Math.floor(maxChars / 4)));
