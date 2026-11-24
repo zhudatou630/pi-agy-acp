@@ -176,6 +176,38 @@ test("tool activity: one paired line for edits and commands, reads dropped, erro
   assert.equal(note.text, "[answered in between by claude/opus]\n[tool] write b.ts → ok");
 });
 
+test("replay edge cases: cut mid tool loop, background and exit codes, note budget, agy plan", () => {
+  const call = (id: string, name: string, args: any) => ({ type: "toolCall", id, name, arguments: args });
+  const result = (id: string, name: string, text: string, isError = false, details?: any) => ({ role: "toolResult", toolCallId: id, toolName: name, isError, content: [{ type: "text", text }], details });
+  const claude = (content: any[]) => ({ role: "assistant", provider: "claude", model: "opus", content });
+  // fresh session cut right after another model's tool call: its result is new input, not lost
+  const msgs = [{ role: "user", content: "run tests" }, claude([call("1", "bash", { command: "npm test" })]), result("1", "bash", "boom\nCommand exited with code 1", true)];
+  for (const tail of [[{ role: "user", content: "why?" }], []]) {
+    const { history, inputs } = splitFresh([...msgs, ...tail]);
+    assert.match(historyTranscript(history, REPLAY_MAX_CHARS, inputs), /bash npm test → error: boom/);
+    const [b] = inputsToBlocks(inputs, { images: true, history }) as any[];
+    assert.match(b.text, /^\[result of bash npm test \(error\)\]\nboom/);
+  }
+  // agy mirrors: a background command answered early is still running; exit code comes from details
+  const bg = historyTranscript([{ role: "user", content: "go" }, { role: "assistant", content: [call("a", "agy_bash", { command: "make" }), call("b", "agy_bash", { command: "make test" })] },
+    result("a", "agy_bash", "Still running in the background (managed by agy).", false, { agy: { status: "in_progress" } }),
+    result("b", "agy_bash", "x".repeat(2000), true, { agy: { status: "completed", exitCode: 2 } })], REPLAY_MAX_CHARS);
+  assert.match(bg, /agy_bash make → still running/);
+  assert.match(bg, /agy_bash make test → error \(exit 2\): x/);
+  // tool lines of a newer note cannot push out the answer text of older notes
+  const noisy = claude([{ type: "text", text: "new conclusion" }, ...Array.from({ length: 400 }, (_, i) => call(`n${i}`, "bash", { command: `cmd ${i} ` + "z".repeat(200) }))]);
+  const [nb] = inputsToBlocks([claude([{ type: "text", text: "old conclusion" }]), noisy, { role: "user", content: "continue" }], { images: true }) as any[];
+  assert.match(nb.text, /old conclusion[\s\S]*new conclusion\n\[tool\] bash cmd \d+ [\s\S]*cmd 399 [^\n]*\n\ncontinue$/);
+  assert.doesNotMatch(nb.text, /cmd 0 /);
+  assert.ok(nb.text.length <= REPLAY_MAX_CHARS + 200, String(nb.text.length));
+  // agy's plan survives as text; only the latest one
+  const plan = historyTranscript([{ role: "user", content: "do it" },
+    { role: "assistant", content: [call("p1", "agy_todo", {})] }, result("p1", "agy_todo", "- [ ] step one\n- [ ] step two"),
+    { role: "assistant", content: [call("p2", "agy_todo", {})] }, result("p2", "agy_todo", "- [x] step one\n- [ ] **in progress** step two")], REPLAY_MAX_CHARS);
+  assert.equal(plan.match(/\[plan\]/g)?.length, 1);
+  assert.match(plan, /\[plan\]\n- \[x\] step one\n- \[ \] \*\*in progress\*\* step two/);
+});
+
 test("debug redaction replaces image bytes", () => {
   const r: any = redact({ prompt: [{ type: "image", mimeType: "image/png", data: "aGVsbG8=" }] });
   assert.match(r.prompt[0].data, /^<image\/png 5B sha256:[0-9a-f]{12}>$/);

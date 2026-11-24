@@ -10,6 +10,7 @@ export const REPLAY_MAX_CHARS = 60_000;
 const MESSAGE_MAX = 8000;
 const NOTE_MAX = 4000;
 const TARGET_MAX = 200;
+const RESULT_SNIPPET = 600;
 const ERROR_TAIL = 300;
 // Only these keep a line on success: what changed and what ran. Reads, searches and other tools leave
 // nothing behind that agy cannot re-check, and the answer text carries what mattered.
@@ -45,29 +46,42 @@ function resultsById(messages: any[]): Map<string, any> {
   return new Map(messages.filter((m) => m.role === "toolResult").map((m) => [m.toolCallId, m]));
 }
 
-/** One line per tool call, paired with its result; undefined when it is not worth keeping. */
-function toolLine(call: any, result: any): string | undefined {
-  if (!result?.isError && !LOGGED_TOOLS.has(call.name)) return undefined;
+function toolCalls(m: any): any[] {
+  return m.role === "assistant" ? contentParts(m.content).filter((p) => p.type === "toolCall") : [];
+}
+
+function callName(call: any): string {
   const a = call.arguments ?? {};
   const target = oneLine(String(a.command ?? a.path ?? a.file_path ?? a.title ?? ""), TARGET_MAX);
-  // exit codes and error messages sit at the end of the output
-  const status = !result ? "result unknown" : result.isError ? `error: ${oneLine(userText(result).slice(-ERROR_TAIL), ERROR_TAIL)}` : "ok";
-  return `[tool] ${call.name}${target ? " " + target : ""} → ${status}`;
+  return `${call.name}${target ? " " + target : ""}`;
+}
+
+function status(result: any): string {
+  if (!result) return "result unknown";
+  const agy = result.details?.agy;
+  // agy mirrors carry the real state: a background command answered early is not done
+  if (!result.isError) return agy?.status && agy.status !== "completed" ? "still running" : "ok";
+  // error messages sit at the end of the output; agy's exit code may be past the clipped text
+  const exit = typeof agy?.exitCode === "number" ? ` (exit ${agy.exitCode})` : "";
+  return `error${exit}: ${oneLine(userText(result).slice(-ERROR_TAIL), ERROR_TAIL)}`;
+}
+
+/** One line per tool call, paired with its result; undefined when it is not worth keeping. */
+function toolLine(call: any, result: any): string | undefined {
+  if (call.name === "agy_todo" || (!result?.isError && !LOGGED_TOOLS.has(call.name))) return undefined;
+  return `[tool] ${callName(call)} → ${status(result)}`;
 }
 
 function toolLines(m: any, results: Map<string, any>): string[] {
-  return contentParts(m.content)
-    .filter((p) => p.type === "toolCall")
-    .map((p) => toolLine(p, results.get(p.id)))
-    .filter((l): l is string => !!l);
+  return toolCalls(m).map((p) => toolLine(p, results.get(p.id))).filter((l): l is string => !!l);
 }
 
 /**
  * Convert new-input messages (after the anchor) to ACP blocks. A user input already sent by an
  * immediate steer is skipped once per entry in `delivered` (the entry is consumed).
  */
-export function inputsToBlocks(inputs: any[], opts: { images: boolean; delivered?: string[] }): AcpBlock[] {
-  const notes = foreignNotes(inputs);
+export function inputsToBlocks(inputs: any[], opts: { images: boolean; delivered?: string[]; history?: any[] }): AcpBlock[] {
+  const notes = foreignNotes(inputs, opts.history ?? []);
   let omitted = false;
   const blocks: AcpBlock[] = [];
   for (const m of inputs) {
@@ -93,21 +107,48 @@ export function inputsToBlocks(inputs: any[], opts: { images: boolean; delivered
   return mergeText(blocks);
 }
 
-/** Notes for other models' turns, newest first within the budget; older ones map to undefined. */
-function foreignNotes(inputs: any[]): Map<any, string | undefined> {
-  const out = new Map<any, string | undefined>();
+/**
+ * Notes for other models' turns within the budget, newest first: answer text and results of calls made
+ * before these inputs (a fresh session cut mid tool loop) first, then tool lines. Dropped ones map to undefined.
+ */
+function foreignNotes(inputs: any[], history: any[]): Map<any, string | undefined> {
   const results = resultsById(inputs);
+  const calls = new Map([...history, ...inputs].flatMap((m) => toolCalls(m).map((c) => [c.id, c] as const)));
+  const inCalls = new Set(inputs.flatMap((m) => toolCalls(m).map((c) => c.id)));
+  const header = (m: any) => `[answered in between by ${m.provider}/${m.model}]`;
+  const kept = new Map<any, string[]>();
+  const out = new Map<any, string | undefined>();
   let left = REPLAY_MAX_CHARS;
-  for (let i = inputs.length - 1; i >= 0; i--) {
-    const m = inputs[i];
-    if (m.role !== "assistant") continue; // tool results are folded into their call's line
-    const body = [headTail(answerText(m), NOTE_MAX), ...toolLines(m, results)].filter((s) => s.trim()).join("\n");
-    if (!body) continue;
-    const note = `[answered in between by ${m.provider}/${m.model}]\n${body}`;
-    const fits = note.length <= left;
-    left = fits ? left - note.length : 0;
-    out.set(m, fits ? note : undefined);
+  const fit = (m: any, s: string) => {
+    if (s.length + 1 > left) return false;
+    left -= s.length + 1;
+    kept.set(m, [...(kept.get(m) ?? []), s]);
+    return true;
+  };
+  const newest = inputs.filter((m) => m.role !== "user").reverse();
+  for (const m of newest) {
+    if (m.role === "assistant") {
+      const text = answerText(m);
+      if (text && !fit(m, `${header(m)}\n${headTail(text, NOTE_MAX)}`)) out.set(m, undefined);
+    } else if (m.role === "toolResult" && !inCalls.has(m.toolCallId)) {
+      const call = calls.get(m.toolCallId) ?? { name: m.toolName };
+      const note = `[result of ${callName(call)}${m.isError ? " (error)" : ""}]\n${headTail(userText(m), RESULT_SNIPPET)}`;
+      if (!fit(m, note)) out.set(m, undefined);
+    }
   }
+  for (const m of newest) {
+    if (m.role !== "assistant" || out.has(m)) continue;
+    const lines = toolLines(m, results);
+    if (!lines.length) continue;
+    const head = kept.has(m) ? 0 : header(m).length + 1;
+    const picked: string[] = [];
+    let room = left - head;
+    for (const l of lines.reverse()) if (l.length + 1 <= room) { room -= l.length + 1; picked.unshift(l); }
+    if (!picked.length) { if (head) out.set(m, undefined); continue; }
+    left = room;
+    kept.set(m, [...(kept.get(m) ?? [header(m)]), ...picked]);
+  }
+  for (const [m, parts] of kept) out.set(m, parts.join("\n"));
   return out;
 }
 
@@ -130,9 +171,10 @@ function mergeText(blocks: AcpBlock[]): AcpBlock[] {
 
 type Item = { text: string; kind: "user" | "answer" | "tool" };
 
-function transcriptItems(history: any[], perMessage: number): Item[] {
-  const results = resultsById(history);
+function transcriptItems(history: any[], later: any[], perMessage: number): Item[] {
+  const results = resultsById([...history, ...later]);
   const items: Item[] = [];
+  let plan: Item | undefined;
   for (const m of history) {
     if (m.role === "user") {
       const text = userText(m);
@@ -142,6 +184,14 @@ function transcriptItems(history: any[], perMessage: number): Item[] {
       const text = answerText(m);
       if (text) items.push({ kind: "answer", text: `[assistant] ${headTail(text, perMessage)}` });
       for (const line of toolLines(m, results)) items.push({ kind: "tool", text: line });
+      // agy's plan lives only in agy_todo; keep the latest one as text
+      for (const c of toolCalls(m).filter((c) => c.name === "agy_todo")) {
+        const md = userText(results.get(c.id) ?? {}).trim();
+        if (!md) continue;
+        if (plan) items.splice(items.indexOf(plan), 1);
+        plan = { kind: "answer", text: `[plan]\n${headTail(md, perMessage)}` };
+        items.push(plan);
+      }
     }
   }
   return items;
@@ -164,9 +214,10 @@ function render(items: Item[], picked: Set<number>): string {
  * Bounded transcript; returns "" when there is nothing to send. Dialogue goes first (latest question and
  * answer, the first question, other questions, other answers, newest first), tool lines get what is
  * left; an item that does not fit is skipped. Output keeps the original order and marks dialogue gaps.
+ * `later` are the messages after `history`, only used to find results of its last tool calls.
  */
-export function historyTranscript(history: any[], maxChars: number): string {
-  const items = transcriptItems(history, Math.min(MESSAGE_MAX, Math.floor(maxChars / 4)));
+export function historyTranscript(history: any[], maxChars: number, later: any[] = []): string {
+  const items = transcriptItems(history, later, Math.min(MESSAGE_MAX, Math.floor(maxChars / 4)));
   const idx = items.map((_, i) => i);
   const of = (kind: Item["kind"]) => idx.filter((i) => items[i].kind === kind);
   const users = of("user");

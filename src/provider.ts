@@ -168,7 +168,7 @@ async function run(inst: Instance, model: Model<any>, messages: any[], options: 
     writer = new Writer(stream, model, newResponseId(session.id));
 
     let turn = session.activeTurn;
-    const blocks = inputsToBlocks(inputs, { images: rt.supportsImages, delivered: turn?.delivered });
+    const blocks = inputsToBlocks(inputs, { images: rt.supportsImages, delivered: turn?.delivered, history });
     if (turn?.ended && blocks.length) {
       // agy finished while pi was busy and new input arrived: show what is left, then start fresh
       for (const item of turn.queue.drain()) if (item.kind === "update") appendChunk(writer, item.update);
@@ -177,7 +177,7 @@ async function run(inst: Instance, model: Model<any>, messages: any[], options: 
     }
     if (!turn) {
       if (!blocks.length) return finish(rt, file, b!, writer, "stop"); // nothing new for agy
-      const transcript = history.length ? historyTranscript(history, REPLAY_MAX_CHARS) : "";
+      const transcript = history.length ? historyTranscript(history, REPLAY_MAX_CHARS, inputs) : "";
       const prompt: AcpBlock[] = transcript ? [{ type: "text", text: transcript }, ...blocks] : blocks;
       const key = inputHash(JSON.stringify(prompt));
       if (b!.failedKey === key) {
@@ -331,8 +331,8 @@ async function runEphemeral(rt: Runtime, model: Model<any>, messages: any[], opt
     session.ephemeral = true;
     await rt.applyConfig(session, { model: model.id, piLevel: (options as any).reasoning });
     const { history, inputs } = splitFresh(messages);
-    const blocks = inputsToBlocks(inputs, { images: rt.supportsImages });
-    const transcript = historyTranscript(history, REPLAY_MAX_CHARS);
+    const blocks = inputsToBlocks(inputs, { images: rt.supportsImages, history });
+    const transcript = historyTranscript(history, REPLAY_MAX_CHARS, inputs);
     const prompt: AcpBlock[] = transcript ? [{ type: "text", text: transcript }, ...blocks] : blocks;
     const payload = await applyPayloadHook(options, { sessionId: session.id, prompt }, model);
     if (signal?.aborted) return writer.fail("aborted", "Cancelled");
