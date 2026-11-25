@@ -352,7 +352,7 @@ async function runEphemeral(rt: Runtime, model: Model<any>, messages: any[], opt
       if (item.kind === "end") {
         turn.closed = true;
         const usage = { used: session.usage.used, acp: item.result?.usage };
-        if (turn.cancelled) writer.fail("aborted", "Cancelled");
+        if (turn.cancelled || item.result?.stopReason === "cancelled") writer.fail("aborted", "Cancelled");
         else if (item.error) writer.fail("error", item.error.message, usage);
         else if (item.result?.stopReason === "refusal") writer.fail("error", QUOTA_MESSAGE, usage); // no partial summary
         else writer.done("stop", usage);
