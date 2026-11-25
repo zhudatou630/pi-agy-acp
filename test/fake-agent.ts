@@ -69,7 +69,8 @@ function serve() {
     if (prev) {
       // native steer: the earlier prompt returns at once, the running script continues for the new one
       prev.steers.push(text);
-      send({ jsonrpc: "2.0", id: prev.promptId, result: { stopReason: "end_turn" } });
+      // like agy, the superseded prompt reports what it billed
+      send({ jsonrpc: "2.0", id: prev.promptId, result: { stopReason: "end_turn", usage: { inputTokens: 100, outputTokens: 7, totalTokens: 107 } } });
       prev.promptId = id;
       return;
     }
@@ -85,6 +86,10 @@ function serve() {
     const script = /SCRIPT:(\w+)/.exec(text)?.[1];
     const cwd = "/tmp/fake-ws";
     switch (script) {
+      case "refusal": // agy maps quota exhaustion to refusal
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "partial" } });
+        finish("refusal");
+        break;
       case "text":
         u({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking about it" } });
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello " } });

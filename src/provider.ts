@@ -4,7 +4,7 @@ import type { AssistantMessage, AssistantMessageEventStream, Model, SimpleStream
 import { type Binding, type BindingFile, inputHash, matchBinding, newInputs, newResponseId, splitFresh } from "./bindings.ts";
 import { mirrorCall, planMarkdown } from "./mirror.ts";
 import { historyTranscript, inputsToBlocks, REPLAY_MAX_CHARS, type AcpBlock } from "./replay.ts";
-import { type AcpSession, CANCEL_WAIT_MS, type Runtime, type SessionOwner, TIMEOUT, type Turn } from "./runtime.ts";
+import { type AcpSession, addUsage, CANCEL_WAIT_MS, type Runtime, type SessionOwner, TIMEOUT, type Turn } from "./runtime.ts";
 
 const BATCH_MS = 150;
 
@@ -257,10 +257,11 @@ async function pump(rt: Runtime, s: AcpSession, turn: Turn, writer: Writer, file
           b.failedKey = turn.promptKey;
           return failWith(rt, file, b, writer, "error", item.error.message);
         }
-        if (stop === "refusal") return failWith(rt, file, b, writer, "error", "agy refused this request (refusal)");
+        // agy maps only quota exhaustion to refusal; say so, keep the raw reason as a fallback
+        if (stop === "refusal") return failWith(rt, file, b, writer, "error", "Antigravity quota exhausted (agy stopReason: refusal). Wait for the quota to reset or switch models.");
         b.failedKey = undefined;
         const reason = stop === "max_tokens" || stop === "max_turn_requests" ? "length" : "stop";
-        return finish(rt, file, b, writer, reason, { used: s.usage.used, acp: item.result?.usage });
+        return finish(rt, file, b, writer, reason, { used: s.usage.used, acp: addUsage(turn.carriedUsage, item.result?.usage) });
       }
       const u = item.update;
       await (options as any).onProviderStreamEvent?.(u, model);

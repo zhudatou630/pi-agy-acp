@@ -97,8 +97,11 @@ test("a background command whose final status never comes stops holding the repl
   await until(() => !!(s = [...rt.sessions.values()].find((x: any) => x.turn?.awaitingWake && x.tools.has("bgx"))), 5000);
   const turn = s.turn;
   assert.equal(rt.watchdog(s, turn), true, "recent activity: keep holding");
+  // the host slept through those 31 minutes: agy did not run either, so it is not silence
   turn.lastActivity = Date.now() - 31 * 60_000;
-  assert.equal(rt.watchdog(s, turn), false);
+  assert.equal(rt.watchdog(s, turn, 31 * 60_000), true, "sleep is not silence");
+  turn.lastActivity = Date.now() - 31 * 60_000;
+  assert.equal(rt.watchdog(s, turn, 30_000), false);
   await run;
   await until(() => !session.isStreaming, 5000);
   const result = session.messages.find((m: any) => m.role === "toolResult" && m.toolCallId === "bgx");

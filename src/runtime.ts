@@ -8,7 +8,7 @@ import { type Catalog, loadCatalog, mapThinkingLevel, saveCatalog } from "./cata
 import { DebugLog } from "./debug.ts";
 import { isTerminal, mergeToolUpdate, type ToolState } from "./mirror.ts";
 
-export const VERSION = "0.2.3";
+export const VERSION = "0.2.4";
 
 /** ~/.pi/agent/pi-agy-acp/config.json */
 export interface RuntimeConfig {
@@ -21,6 +21,7 @@ export const CANCEL_WAIT_MS = 10_000;
 /** Resume after a restart is lossless but pays agy's ~2.5 s warmup; one idle process is ~230 MB. */
 const IDLE_SHUTDOWN_MS = 30 * 60_000;
 const WATCHDOG_MS = 600_000;
+const WATCHDOG_TICK_MS = 30_000;
 /** After a background command finishes, how long agy may take to start its own report. */
 const WAKE_GRACE_MS = 20_000;
 /** agy ends every model call with usage_update, followed at once by that call's tool calls, if any.
@@ -30,6 +31,14 @@ const WAKE_SETTLE_MS = 2_000;
 const WAKE_QUIET_MS = 120_000;
 /** agy can drop a background command's final status: stop holding the reply after this much silence. */
 const HOLD_SILENT_MS = 30 * 60_000;
+
+/** Sum of two ACP prompt usages (field by field); either may be missing. */
+export function addUsage(a: any, b: any): any {
+  if (!a || !b) return a ?? b;
+  const out = { ...a };
+  for (const [k, v] of Object.entries(b)) if (typeof v === "number") out[k] = (typeof out[k] === "number" ? out[k] : 0) + v;
+  return out;
+}
 
 export class AuthRequiredError extends Error {
   constructor() {
@@ -131,6 +140,8 @@ export class Turn {
   /** During its own report, agy's last model call ended (usage_update) and nothing followed yet. */
   stepDone = false;
   endResult: any;
+  /** Usage reported by prompts a steer superseded; added to the final prompt's. */
+  carriedUsage: any;
   wakeTimer: NodeJS.Timeout | undefined;
   readonly abort = new AbortController();
   lastActivity = Date.now();
@@ -465,7 +476,11 @@ export class Runtime {
   }
 
   private endTurn(s: AcpSession, turn: Turn, n: number, item: { result?: any; error?: Error }): void {
-    if (turn.latestPrompt !== n || turn.ended) return; // superseded by a steer
+    if (turn.latestPrompt !== n || turn.ended) {
+      // superseded by a steer: agy still billed that prompt
+      if (!turn.ended) turn.carriedUsage = addUsage(turn.carriedUsage, item.result?.usage);
+      return;
+    }
     if (!s.ephemeral && !turn.cancelled && item.result?.stopReason === "end_turn" && [...s.tools.values()].some(holdsTurn)) {
       // agy moved a command to the background and reports when it is done: keep the pi reply
       // open, like pi's own bash. Daemons and schedules do not hold it.
@@ -537,13 +552,21 @@ export class Runtime {
   }
 
   private armWatchdog(s: AcpSession, turn: Turn): void {
-    const tick = () => { if (this.watchdog(s, turn)) setTimeout(tick, 30_000).unref(); };
-    setTimeout(tick, 30_000).unref();
+    let last = Date.now();
+    const tick = () => {
+      const now = Date.now();
+      const gap = now - last;
+      last = now;
+      if (this.watchdog(s, turn, gap)) setTimeout(tick, WATCHDOG_TICK_MS).unref();
+    };
+    setTimeout(tick, WATCHDOG_TICK_MS).unref();
   }
 
-  /** One watchdog check; false once the turn is over. */
-  watchdog(s: AcpSession, turn: Turn): boolean {
+  /** One watchdog check; false once the turn is over. `gap`: wall time since the previous check. */
+  watchdog(s: AcpSession, turn: Turn, gap = 0): boolean {
     if (turn.ended) return false;
+    // a check far later than scheduled means the host slept: agy was not running either, so it is not silence
+    if (gap > 2 * WATCHDOG_TICK_MS) turn.lastActivity = Math.min(Date.now(), turn.lastActivity + gap - WATCHDOG_TICK_MS);
     const silent = Date.now() - turn.lastActivity;
     if (turn.awaitingWake && turn.pendingPermissions === 0 && silent > HOLD_SILENT_MS) {
       // no cancel: the command may still be running, and agy's later report opens a new reply

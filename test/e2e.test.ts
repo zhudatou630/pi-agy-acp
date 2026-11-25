@@ -116,6 +116,17 @@ test("steer mid-turn is sent to agy immediately, exactly once, and lands in orde
   assert.ok(iBanana > 0);
   assert.equal(session.messages[iBanana - 1].role, "assistant", roles.join(","));
   assert.match(lastText(session), /steer-received:banana/);
+  // the superseded prompt's billed usage is added to the turn's, not dropped
+  assert.equal(assistants(session).at(-1).usage.output, 34 + 7);
+});
+
+test("refusal (agy's quota exhaustion) is reported as a quota error, not retried", async () => {
+  const { session } = await createSession(env);
+  await session.prompt("SCRIPT:refusal");
+  const a = assistants(session).at(-1);
+  assert.equal(a.stopReason, "error");
+  assert.match(a.errorMessage, /quota exhausted.*refusal/);
+  assert.equal(env.prompts().filter((p) => JSON.stringify(p.params.prompt).includes("SCRIPT:refusal")).length, 1, "pi must not auto-retry it");
 });
 
 test("question requests go to a select dialog even in yolo mode", async () => {
