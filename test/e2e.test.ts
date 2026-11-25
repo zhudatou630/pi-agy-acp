@@ -121,8 +121,9 @@ test("steer mid-turn is sent to agy immediately, exactly once, and lands in orde
 });
 
 test("refusal (agy's quota exhaustion) is reported as a quota error, not retried", async () => {
-  const { session } = await createSession(env);
+  const { session } = await createSession(env, { settings: { retry: { enabled: true, maxRetries: 2, baseDelayMs: 10 } } });
   await session.prompt("SCRIPT:refusal");
+  await until(() => !session.isStreaming, 5000);
   const a = assistants(session).at(-1);
   assert.equal(a.stopReason, "error");
   assert.match(a.errorMessage, /quota exhausted.*refusal/);

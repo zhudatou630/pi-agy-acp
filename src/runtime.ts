@@ -21,7 +21,6 @@ export const CANCEL_WAIT_MS = 10_000;
 /** Resume after a restart is lossless but pays agy's ~2.5 s warmup; one idle process is ~230 MB. */
 const IDLE_SHUTDOWN_MS = 30 * 60_000;
 const WATCHDOG_MS = 600_000;
-const WATCHDOG_TICK_MS = 30_000;
 /** After a background command finishes, how long agy may take to start its own report. */
 const WAKE_GRACE_MS = 20_000;
 /** agy ends every model call with usage_update, followed at once by that call's tool calls, if any.
@@ -144,7 +143,8 @@ export class Turn {
   carriedUsage: any;
   wakeTimer: NodeJS.Timeout | undefined;
   readonly abort = new AbortController();
-  lastActivity = Date.now();
+  /** Monotonic (performance.now): host sleep and wall-clock changes are not agy silence. */
+  lastActivity = performance.now();
 }
 
 /** Daemons and timers: they may never finish, so nothing waits for them. */
@@ -462,7 +462,7 @@ export class Runtime {
       this.armWatchdog(s, turn);
     }
     const n = ++turn.latestPrompt;
-    turn.lastActivity = Date.now();
+    turn.lastActivity = performance.now();
     turn.awaitingWake = false; // a prompt is in flight again (steer)
     turn.woke = false;
     turn.stepDone = false;
@@ -552,22 +552,14 @@ export class Runtime {
   }
 
   private armWatchdog(s: AcpSession, turn: Turn): void {
-    let last = Date.now();
-    const tick = () => {
-      const now = Date.now();
-      const gap = now - last;
-      last = now;
-      if (this.watchdog(s, turn, gap)) setTimeout(tick, WATCHDOG_TICK_MS).unref();
-    };
-    setTimeout(tick, WATCHDOG_TICK_MS).unref();
+    const tick = () => { if (this.watchdog(s, turn)) setTimeout(tick, 30_000).unref(); };
+    setTimeout(tick, 30_000).unref();
   }
 
-  /** One watchdog check; false once the turn is over. `gap`: wall time since the previous check. */
-  watchdog(s: AcpSession, turn: Turn, gap = 0): boolean {
+  /** One watchdog check; false once the turn is over. */
+  watchdog(s: AcpSession, turn: Turn): boolean {
     if (turn.ended) return false;
-    // a check far later than scheduled means the host slept: agy was not running either, so it is not silence
-    if (gap > 2 * WATCHDOG_TICK_MS) turn.lastActivity = Math.min(Date.now(), turn.lastActivity + gap - WATCHDOG_TICK_MS);
-    const silent = Date.now() - turn.lastActivity;
+    const silent = performance.now() - turn.lastActivity;
     if (turn.awaitingWake && turn.pendingPermissions === 0 && silent > HOLD_SILENT_MS) {
       // no cancel: the command may still be running, and agy's later report opens a new reply
       this.finishTurn(s, turn, { result: turn.endResult });
@@ -606,7 +598,7 @@ export class Runtime {
       turn = this.startWake(s);
     }
     if (turn) {
-      turn.lastActivity = Date.now();
+      turn.lastActivity = performance.now();
       if (speaks && turn.awaitingWake) turn.woke = true;
       if (u.sessionUpdate === "usage_update") turn.stepDone = turn.woke;
       else if (speaks) turn.stepDone = false;
@@ -689,7 +681,7 @@ export class Runtime {
     } catch {
       return cancelled;
     } finally {
-      if (turn) { turn.pendingPermissions--; turn.lastActivity = Date.now(); this.wakeCheck(s, turn); }
+      if (turn) { turn.pendingPermissions--; turn.lastActivity = performance.now(); this.wakeCheck(s, turn); }
     }
   }
 

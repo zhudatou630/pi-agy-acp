@@ -57,3 +57,10 @@ test("pi compaction runs in a throwaway session and the chat keeps its ACP sessi
   assert.equal(promptSid(), sid);
   assert.deepEqual(env.prompts().at(-1).params.prompt, [{ type: "text", text: "after compaction" }]);
 });
+
+test("compaction that hits agy's quota (refusal) fails instead of saving a partial summary", async () => {
+  const { session } = await createSession(env, { settings: { compaction: { enabled: false, keepRecentTokens: 50, reserveTokens: 100 } } });
+  await session.prompt("SCRIPT:refusal " + "lorem ipsum ".repeat(400));
+  for (const t of ["b", "c", "d"]) await session.prompt(`turn ${t} ` + "lorem ipsum ".repeat(400));
+  await assert.rejects(session.compact(), /quota exhausted/);
+});

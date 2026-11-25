@@ -268,7 +268,7 @@ sequenceDiagram
   - agyPath 的查找顺序：配置项 → `PI_AGY_BIN` → PATH 里的 `agy` → `~/.local/bin/agy`。
 - **复用**：整个 pi 进程共用一个 agy 进程（挂在 `globalThis` 上），多个会话靠 sessionId 复用它。`initialize` 只做一次，结果缓存下来。model、thought_level 和 mode 都是**按 ACP 会话**设置的，所以不同的 pi 会话可以同时用不同的模型并行工作（已实测，见 D2）。
 - **崩溃**：进程 `exit` 时，所有 pending RPC 都 reject；正在进行的 turn 结束为 `error`，提示“agy 进程退出（code/signal），下次发送会自动重启并接回会话”；所有 binding 标记为需要 resume。**不自动重发**那条 prompt，因为它可能已经产生了副作用。下一次请求时再重新拉起进程。
-- **卡死保护**：一个 turn 在 10 分钟内没有任何事件，且没有正在进行的工具或待处理的权限请求时，判定为卡死：发 cancel，并以 error 结束。
+- **卡死保护**：一个 turn 在 10 分钟内没有任何事件，且没有正在进行的工具或待处理的权限请求时，判定为卡死：发 cancel，并以 error 结束。静默时长用单调时钟（`performance.now()`）计算：在 Linux 上主机休眠和手动调整系统时间都不算静默（agy 也在睡），pi 自己的事件循环被阻塞则照常计入；后台命令 30 分钟的上限同样如此。
 - **空闲退出**：没有活动 turn（已判定 broken 的会话不算，agy 可能永远不回它的 prompt）、超过 30 分钟既没有请求也没有 agy 的 `session/update` 时（agy 主动工作期间不会被回收），先 `session/close` 关闭所有会话，再结束进程。
 - **退出清理**：
   - 正常路径：`session_shutdown`（最后一个实例退出时）→ 关闭会话 → 关闭 stdin → 对进程组发 `SIGTERM`（`kill(-pgid)`）→ 2 秒后还在就 `SIGKILL`。
@@ -291,7 +291,7 @@ sequenceDiagram
   全程只使用官方的登录流程，不读取也不复制 token。输出的具体格式会在实现时用临时 HOME 实测确认，不会碰已经登录的 profile。
 - **其他错误**：
   - 找不到 agy 可执行文件：提示安装方式。
-  - 配额或 429（RESOURCE_EXHAUSTED、QUOTA_EXHAUSTED）：原文显示，不自动重试。
+  - 配额或 429（RESOURCE_EXHAUSTED、QUOTA_EXHAUSTED）：原文显示，不自动重试。agy 只在配额用尽时返回 `stopReason: refusal`（T3 Code 的结论），所以提示“配额已用完”并保留原始的 stopReason；文案避开 pi 自动重试的关键词。其他上游报错 agy 会作为正文加 `end_turn` 发出，只能从它的私有数据库识别，按约定不读，用户看到的就是报错原文。
   - 进程退出：见 3.9。
   - 未知的 JSON-RPC 错误：显示 `code` 和 `message`。
 
@@ -310,7 +310,8 @@ sequenceDiagram
   - `totalTokens` = 最后一次 `usage_update.used`，即上下文占用；
   - `input` / `cacheRead` / `cacheWrite` = 把计费累计的三项按比例缩放到 `totalTokens`（保留缓存命中比例）；`output` 保持计费值。
 - 原因：pi 把单条消息的 `input + cacheRead` 当成一次请求的 prompt。若写入整轮累计，长回合会超过上下文窗口，被 pi 的静默溢出检查误判并触发压缩；写进 `totalTokens` 则会污染上下文估算（Zac #80 的教训）。代价是 token 分项不再是计费口径，费用仍是。
-- 没有 `usage_update` 的 turn（如 agy 自己的 `/compact`）不记用量：只有计费值时，pi 会把各项之和当成上下文占用。以下情况只会少算、不会多算，属于已接受的限制：被 steer 接管的 prompt 没有 usage；agy 已结束但 pi 带着新输入另开 turn、或在后台等待期间 steer/停止时，前一个 prompt 的 usage 会被丢弃；回合中途在 pi 切换模型时，续接消息按新模型记名和计价；分档价格按整轮累计量选档（拿不到逐次调用的数）。
+- 被 steer 接管的 prompt 返回的计费用量累加进本轮，和最后一个 prompt 的一起计费。
+- 没有 `usage_update` 的 turn（如 agy 自己的 `/compact`）不记用量：只有计费值时，pi 会把各项之和当成上下文占用。以下情况只会少算、不会多算，属于已接受的限制：以错误（含配额用尽）或取消结束的一轮不记用量，因为带用量的错误消息会影响 pi 对上下文占用和溢出的判断；agy 已结束但 pi 带着新输入另开 turn、或在后台等待期间 steer/停止时，前一个 prompt 的 usage 会被丢弃；回合中途在 pi 切换模型时，续接消息按新模型记名和计价；分档价格按整轮累计量选档（拿不到逐次调用的数）。
 
 ## 4. 发给 agy 的内容（干净性约定）
 
