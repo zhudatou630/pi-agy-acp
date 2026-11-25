@@ -127,6 +127,7 @@ test("refusal (agy's quota exhaustion) is reported as a quota error, not retried
   const a = assistants(session).at(-1);
   assert.equal(a.stopReason, "error");
   assert.match(a.errorMessage, /quota exhausted.*refusal/);
+  assert.equal(a.usage.output, 34, "what agy billed before failing is still recorded");
   assert.equal(env.prompts().filter((p) => JSON.stringify(p.params.prompt).includes("SCRIPT:refusal")).length, 1, "pi must not auto-retry it");
 });
 

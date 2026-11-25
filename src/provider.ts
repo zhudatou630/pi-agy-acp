@@ -80,6 +80,13 @@ class Writer {
   done(reason: "stop" | "toolUse" | "length", usage?: Usage): void {
     this.start();
     this.close();
+    this.applyUsage(usage);
+    this.msg.stopReason = reason;
+    this.stream.push({ type: "done", reason, message: this.msg });
+    this.stream.end();
+  }
+
+  private applyUsage(usage?: Usage): void {
     // Cost is priced from agy's billed totals for the whole turn (all internal calls). Token fields then describe
     // the context: totalTokens = usage_update size, and the prompt classes are scaled to it (keeping the cache ratio),
     // because pi reads input+cacheRead of one message as a single request (silent-overflow check, context estimate).
@@ -100,13 +107,12 @@ class Writer {
         u.input = usage.used - u.cacheRead - u.cacheWrite;
       }
     }
-    this.msg.stopReason = reason;
-    this.stream.push({ type: "done", reason, message: this.msg });
-    this.stream.end();
   }
 
-  fail(reason: "error" | "aborted", message: string): void {
+  /** `usage`: what agy billed before failing (pi leaves error messages out of its context estimate). */
+  fail(reason: "error" | "aborted", message: string, usage?: Usage): void {
     this.close();
+    this.applyUsage(usage);
     this.msg.stopReason = reason;
     this.msg.errorMessage = message;
     this.stream.push({ type: "error", reason, error: this.msg });
@@ -235,10 +241,10 @@ function finish(rt: Runtime, file: BindingFile, b: Binding, writer: Writer, reas
   writer.done(reason, usage);
 }
 
-function failWith(rt: Runtime, file: BindingFile, b: Binding, writer: Writer, reason: "error" | "aborted", message: string): void {
+function failWith(rt: Runtime, file: BindingFile, b: Binding, writer: Writer, reason: "error" | "aborted", message: string, usage?: Usage): void {
   b.produced.push({ id: writer.msg.responseId!, discardable: true });
   rt.store.save(file);
-  writer.fail(reason, message);
+  writer.fail(reason, message, usage);
 }
 
 async function pump(rt: Runtime, s: AcpSession, turn: Turn, writer: Writer, file: BindingFile, b: Binding, options: SimpleStreamOptions, model: Model<any>): Promise<void> {
@@ -254,15 +260,16 @@ async function pump(rt: Runtime, s: AcpSession, turn: Turn, writer: Writer, file
       if (item.kind === "end") {
         turn.closed = true;
         const stop = item.result?.stopReason;
+        const usage = { used: s.usage.used, acp: addUsage(turn.carriedUsage, item.result?.usage) };
         if (turn.cancelled || stop === "cancelled") return failWith(rt, file, b, writer, "aborted", "Cancelled");
         if (item.error) {
           b.failedKey = turn.promptKey;
-          return failWith(rt, file, b, writer, "error", item.error.message);
+          return failWith(rt, file, b, writer, "error", item.error.message, usage);
         }
-        if (stop === "refusal") return failWith(rt, file, b, writer, "error", QUOTA_MESSAGE);
+        if (stop === "refusal") return failWith(rt, file, b, writer, "error", QUOTA_MESSAGE, usage);
         b.failedKey = undefined;
         const reason = stop === "max_tokens" || stop === "max_turn_requests" ? "length" : "stop";
-        return finish(rt, file, b, writer, reason, { used: s.usage.used, acp: addUsage(turn.carriedUsage, item.result?.usage) });
+        return finish(rt, file, b, writer, reason, usage);
       }
       const u = item.update;
       await (options as any).onProviderStreamEvent?.(u, model);
@@ -344,9 +351,11 @@ async function runEphemeral(rt: Runtime, model: Model<any>, messages: any[], opt
       if (item === TIMEOUT) return writer.fail("aborted", "Cancelled"); // aborted; closeSession cancels agy
       if (item.kind === "end") {
         turn.closed = true;
-        if (item.error || turn.cancelled) writer.fail(turn.cancelled ? "aborted" : "error", item.error?.message ?? "Cancelled");
-        else if (item.result?.stopReason === "refusal") writer.fail("error", QUOTA_MESSAGE); // no partial summary
-        else writer.done("stop", { used: session.usage.used, acp: item.result?.usage });
+        const usage = { used: session.usage.used, acp: item.result?.usage };
+        if (turn.cancelled) writer.fail("aborted", "Cancelled");
+        else if (item.error) writer.fail("error", item.error.message, usage);
+        else if (item.result?.stopReason === "refusal") writer.fail("error", QUOTA_MESSAGE, usage); // no partial summary
+        else writer.done("stop", usage);
         return;
       }
       if (item.kind === "update") appendChunk(writer, item.update);
