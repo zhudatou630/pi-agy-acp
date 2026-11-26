@@ -149,3 +149,15 @@ prompt 里放 `{"type":"image","mimeType":"image/png","data":"<base64>"}`，模�
 ## 12. 其他 flag（`agy acp --help`）
 
 `--process-per-session`、`--sandbox`、`--disable-telemetry`、`--dangerously-skip-permissions`、`--add-dir`、`--gemini-dir`、`--app-data-dir`、`--log-file`、`--login`。
+
+## 13. 客户端传入的 MCP server（agy 1.5.17，2026-11-26）
+
+用探测脚本加一个记录收发的 stdio MCP 桩实测，场景都在 `/tmp` 里跑，模型 flash + low。
+
+- `session/new` 和 `session/resume` 的 `mcpServers` 里放 `{name, command, args, env:[{name,value}]}`，agy 会为这个会话拉起该进程并带上这份 env，依次发 `server/discover`（回 -32601 也不影响）、`initialize`（`protocolVersion: "2025-11-25"`）、`notifications/initialized`、`tools/list`。这一步不发 prompt，不耗额度。每次 resume 都重新拉起一个；同一个 agy 进程里旧的那个要等 agy 退出才结束。
+- 工具在 agy 里叫 `mcp_<server>_<tool>`；agy 已经知道另一个同名 server 时，会在 server 名后加一段哈希，例如 `mcp_pi_9f9e3b21_subagent`（pi-web 里实测）。ACP 里依次是 `tool_call`（`name` 为这个名字，`kind: "other"`，`rawInput` 是参数加 agy 自加的 `toolSummary`）、`request_permission`（带 toolCallId）、客户端应答，约 1 ms 后 MCP 才收到 `tools/call`。`tools/call` 的 `params._meta` 带 `antigravity.google/conversation_id` 和 `root_conversation_id`（ACP 会话 id），不带 ACP 的 toolCallId。
+- 让 agy 在一步里并行调两次同一个工具，实际是串行的：第一个返回后才发第二个。
+- **一次 MCP 调用最多 180 秒**：到时 agy 发 `notifications/cancelled`（`reason: "context deadline exceeded"`），工具记为 failed。每 20 秒发一次 `notifications/progress` 不续期；在 mcpServers 条目上加 `timeoutSeconds`、`timeout`（数字或 `"600s"`）、`_meta` 里的同名字段都无效。
+- 发 `notifications/tools/list_changed` 后 agy 立即重新 `tools/list`。
+- agy 把工具 schema 缓存在 `~/.gemini/antigravity-cli/mcp/<server>/<tool>.json`（agy 自己写的，插件不碰）。
+- 对比：`run_command` 跑 `sleep 300 && echo …`，agy 自己填 `WaitMsBeforeAsync: 500`、`NotificationTimeoutSeconds: 330`，回一句“完成后会通知我”；300 秒后命令 completed，agy 不经 prompt 醒来，直接报出输出（没有再调工具）。所以长时间的等待交给后台命令，不放在 MCP 调用里。

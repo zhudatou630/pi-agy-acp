@@ -17,7 +17,13 @@ export interface ToolState {
   background?: boolean;
   /** Process exited or session was cancelled. */
   aborted?: string;
+  /** pi-web's card details of the sub-agent this call started (links the card to the child session). */
+  subagent?: Record<string, any>;
 }
+
+/** How agy names our MCP tool (server "pi", tool "subagent"): `mcp_pi_subagent`, or with a hash after
+ *  the server name when it already knows another server called "pi" (`mcp_pi_9f9e3b21_subagent`). */
+export const isSubagentTool = (name: string | undefined) => !!name && /^mcp_pi_(?:[0-9a-z]+_)?subagent$/.test(name);
 
 export const MIRROR_TOOLS = ["agy_bash", "agy_edit", "agy_write", "agy_read", "agy_tool", "agy_todo"] as const;
 
@@ -72,7 +78,8 @@ export function mirrorCall(s: ToolState): { name: string; args: Record<string, a
     return { name: "agy_write", args: { path, content: String(content) } };
   }
   if (s.kind === "read") return { name: "agy_read", args: { path: primaryPath(s) ?? s.title ?? "" } };
-  const args: Record<string, any> = { title: s.title ?? s.name ?? s.kind ?? "tool" };
+  const title = isSubagentTool(s.name) ? `pi agent: ${input.description || input.subagent_type || input.resume || "task"}` : s.title;
+  const args: Record<string, any> = { title: title ?? s.name ?? s.kind ?? "tool" };
   if (s.kind) args.kind = s.kind;
   for (const [k, v] of Object.entries(input)) {
     if (k === "toolSummary") continue;
@@ -110,7 +117,7 @@ export interface MirrorResult {
 }
 
 export function mirrorResult(s: ToolState): MirrorResult {
-  const details: Record<string, any> = { agy: { title: s.title, kind: s.kind, name: s.name, status: s.status } };
+  const details: Record<string, any> = { ...s.subagent, agy: { title: s.title, kind: s.kind, name: s.name, status: s.status } };
   const notes: string[] = [];
   if (s.aborted) return { content: [{ type: "text", text: s.aborted }], details, isError: true };
   if (s.background && s.status !== "completed" && s.status !== "failed") {

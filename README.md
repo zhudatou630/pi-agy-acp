@@ -50,6 +50,7 @@
 - **会话**：每个 pi 会话对应一个 agy 会话，重启后自动接上。fork 出来的会话会新开一个 agy 会话，并附上之前的对话转录。这些会话也会出现在 agy CLI 的会话列表里，可以用 `agy --conversation <id>` 接着聊（`/agy status` 可以看到 id），但不要两边同时用同一个会话。
 - **压缩**：pi 的 `/compact`（和 pi-web 的压缩按钮）会先让 agy 压缩自己的上下文，再照常压缩 pi 的历史，比原来多一次请求。只想压缩 agy 那边就用 `/agy compact`，一次请求，pi 的历史不动；它开始后不能用停止按钮取消，期间再发消息会打断它。上下文占用在下一轮回复后更新。
 - **pi-web 子代理**：子代理要用 antigravity 的模型，它的 profile 需要打开 `load_extensions`。pi-web 内置的 profile 默认没开，那样的子代理只能得到纯文字回答：没有工具卡片，命令会被拒绝，每轮之间也不共享上下文，而且 agy 是在父会话的目录里运行的，`worktree` 隔离对它不起作用。
+- **让 agy 调用 pi 的子代理**（需要 pi-web 支持子代理桥）：对 agy 说“用 pi 的 explore agent 看一下 …”或“让 opus review …”，agy 会调用工具 `subagent` 发起 pi-web 的子代理，再把返回的 `pi-agent wait …` 命令放到后台，子代理结束后 agy 自动读到报告。可用的类型和模型来自 pi-web 的 Agents 配置；子代理和原生的一样会出现在父会话的卡片和右上角的 Agents 列表里，跟进时 agy 会带上 `resume`。只有该会话本来就能用 `Agent` 时才提供；按停止不会停掉子代理，要停就点进子会话去停。pi TUI 里不提供。
 - **规则和约束**：插件不会把 pi 的 system prompt 发给 agy。agy 的规则写在 agy 自己的位置：项目里的 `AGENTS.md` / `GEMINI.md` / `.agents/rules/`，或者全局的 `~/.gemini/`。
 - **agy 自带的 slash 命令**：不会注册到 pi。真要用的话，在 agy 模型下直接输入 `/goal …`，会原样发给 agy。
 - **管理命令**：`/agy status | models refresh | login | new | compact | debug on|off | restart`。只输入 `/agy` 会列出这些子命令。

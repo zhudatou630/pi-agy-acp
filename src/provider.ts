@@ -183,7 +183,7 @@ async function run(registered: Instance, model: Model<any>, messages: any[], opt
       inputs = newInputs(messages, match.anchor);
       // a turn this instance is still draining (e.g. agy crashed during a mirror wait) comes first
       const attached = inst.session();
-      session = attached?.id === b.acpSessionId && attached.activeTurn ? attached : await rt.resumeSession(b.acpSessionId, b.cwd);
+      session = attached?.id === b.acpSessionId && attached.activeTurn ? attached : await rt.resumeSession(b.acpSessionId, b.cwd, inst);
       if (!session) {
         history = match.anchor >= 0 ? messages.slice(0, match.anchor + 1).filter((m) => m.role !== "system") : splitFresh(messages).history;
         notice = "The previous agy session no longer exists; started a new one with the earlier conversation transcript.";
@@ -193,7 +193,7 @@ async function run(registered: Instance, model: Model<any>, messages: any[], opt
       ({ history, inputs } = splitFresh(messages));
     }
     if (!session) {
-      session = await rt.newSession(ctx.cwd);
+      session = await rt.newSession(ctx.cwd, inst);
       b = { acpSessionId: session.id, cwd: ctx.cwd, createdAt: Date.now(), lastActive: Date.now(), produced: [] };
       file.bindings.unshift(b);
     }
@@ -384,7 +384,7 @@ export async function compactAgy(inst: Instance, want: { model?: string; piLevel
   // the context as the next request carries it: anchors pi compacted away no longer count
   const match = matchBinding(file, ctx.sessionManager.buildSessionProjection().messages);
   if (!match) return "none";
-  const session = await rt.resumeSession(match.binding.acpSessionId, match.binding.cwd);
+  const session = await rt.resumeSession(match.binding.acpSessionId, match.binding.cwd, inst);
   if (!session) return "none";
   // not closed: pi is still showing that reply, and a prompt now would steer it
   if (session.activeTurn || session.command) return "busy";
