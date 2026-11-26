@@ -76,8 +76,8 @@ export class AcpSession {
   stopped = false;
   /** Cancel never settled: do not reuse without close + resume. */
   broken = false;
-  /** A command for agy itself (/compact) is in flight; settles when it is over, never rejects. */
-  command: Promise<void> | undefined;
+  /** Marks a command for agy itself (/compact) in flight; a chat prompt clears it and takes over. */
+  command: object | undefined;
   ephemeral = false;
 
   constructor(id: string, cwd: string, setup: any) {
@@ -372,33 +372,38 @@ export class Runtime {
   /**
    * A slash command for agy itself (/compact), outside any reply: no turn, nothing shown in pi, and
    * Stop stays in force (only the user's next message lifts it). What agy says on its own meanwhile
-   * opens a reply as usual; a chat prompt waits, because agy would take it as a steer of the command.
+   * opens a reply as usual. A chat prompt sent meanwhile takes over, as agy does natively: the
+   * command's prompt returns at once and the command fails as interrupted.
    */
-  command(s: AcpSession, text: string, config: { model?: string; piLevel?: string }, signal?: AbortSignal): Promise<any> {
-    const run = (async () => {
+  async command(s: AcpSession, text: string, config: { model?: string; piLevel?: string }, signal?: AbortSignal): Promise<any> {
+    const mine = (s.command = {});
+    const interrupted = () => new Error(`A new message interrupted ${text}.`);
+    try {
       await this.applyConfig(s, config); // agy resets the model on resume
       const proc = await this.ensure();
       if (signal?.aborted) throw new Error("Cancelled");
+      if (s.command !== mine) throw interrupted(); // sent now, it would steer that message's reply
       const onAbort = () => proc.notify("session/cancel", { sessionId: s.id });
       signal?.addEventListener("abort", onAbort, { once: true });
       try {
-        return await proc.request("session/prompt", { sessionId: s.id, prompt: [{ type: "text", text }] }, COMMAND_TIMEOUT_MS);
+        const result = await proc.request("session/prompt", { sessionId: s.id, prompt: [{ type: "text", text }] }, COMMAND_TIMEOUT_MS);
+        if (s.command !== mine) throw interrupted();
+        return result;
       } catch (err) {
         if (err instanceof AcpError && err.code === -32001) s.broken = true; // timed out: agy may never end it
         throw err;
       } finally {
         signal?.removeEventListener("abort", onAbort);
       }
-    })();
-    const settled: Promise<void> = run.then(() => {}, () => {}).then(() => { if (s.command === settled) s.command = undefined; });
-    s.command = settled;
-    return run;
+    } finally {
+      if (s.command === mine) s.command = undefined;
+    }
   }
 
   /** Start a turn, or steer the running one: agy supersedes the previous prompt natively. */
   async prompt(s: AcpSession, blocks: any[]): Promise<Turn> {
-    await s.command;
     const proc = await this.ensure();
+    s.command = undefined; // agy ends a command's prompt when this one arrives
     let turn = s.activeTurn && !s.activeTurn.ended ? s.activeTurn : undefined;
     if (!turn) {
       s.turn = turn = new Turn();
@@ -519,6 +524,8 @@ export class Runtime {
     const s = this.sessions.get(params?.sessionId);
     const u = params?.update;
     if (!u || !s) return;
+    // the command's own model call: not the close of a reply's step, nor the context size of one
+    if (s.command && u.sessionUpdate === "usage_update") return;
     if (!s.ephemeral) this.armIdle(); // agy working on its own (no prompt in flight) is use too
     let turn = s.turn && !s.turn.ended ? s.turn : undefined;
     const speaks = ["agent_message_chunk", "agent_thought_chunk", "plan"].includes(u.sessionUpdate)

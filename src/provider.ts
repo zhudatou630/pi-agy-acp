@@ -383,7 +383,7 @@ export async function compactAgy(inst: Instance, want: { model?: string; piLevel
   const file = rt.store.load(own);
   // the context as the next request carries it: anchors pi compacted away no longer count
   const match = matchBinding(file, ctx.sessionManager.buildSessionProjection().messages);
-  if (!match || match.anchor < 0) return "none";
+  if (!match) return "none";
   const session = await rt.resumeSession(match.binding.acpSessionId, match.binding.cwd);
   if (!session) return "none";
   // not closed: pi is still showing that reply, and a prompt now would steer it
@@ -407,7 +407,8 @@ async function runEphemeral(rt: Runtime, model: Model<any>, messages: any[], opt
     const { history, inputs } = splitFresh(messages);
     const blocks = inputsToBlocks(inputs, { images: rt.supportsImages, history });
     const transcript = historyTranscript(history, REPLAY_MAX_CHARS, messages);
-    const prompt: AcpBlock[] = transcript ? [{ type: "text", text: transcript }, ...blocks] : blocks;
+    // text only by intent; permission requests are refused, but agy does not ask before every write
+    const prompt: AcpBlock[] = [...[transcript, READ_ONLY_NOTE].filter(Boolean).map((text) => ({ type: "text" as const, text })), ...blocks];
     const payload = await applyPayloadHook(options, { sessionId: session.id, prompt }, model);
     if (signal?.aborted) return writer.fail("aborted", "Cancelled");
     const turn = await rt.prompt(session, payload.prompt);

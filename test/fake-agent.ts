@@ -41,6 +41,7 @@ function serve() {
   const waiting = new Map<string | number, (v: any) => void>();
   const running = new Map<string, { promptId: number | string; cancelled: boolean; steers: string[] }>();
   const cancelledSessions = new Set<string>();
+  let slowCompact = false;
 
   const send = (m: any) => process.stdout.write(JSON.stringify(m) + "\n");
   const update = (sessionId: string, u: any) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: u } });
@@ -88,12 +89,19 @@ function serve() {
     };
     if (text.trim() === "/compact") {
       // like agy 1.5.14: no updates at all, only the prompt result
+      const slow = slowCompact;
+      slowCompact = false;
+      for (let i = 0; slow && i < 20 && !run.steers.length; i++) await sleep(50);
       running.delete(sessionId);
       return send({ jsonrpc: "2.0", id: run.promptId, result: { stopReason: "end_turn", usage: { inputTokens: 500, outputTokens: 80, totalTokens: 580 } } });
     }
     const script = /SCRIPT:(\w+)/.exec(text)?.[1];
     const cwd = "/tmp/fake-ws";
     switch (script) {
+      case "slowcompact": // the next /compact takes a second, unless a prompt takes over
+        slowCompact = true;
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } });
+        return finish("end_turn");
       case "refusal": // agy maps quota exhaustion to refusal
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "partial" } });
         finish("refusal");

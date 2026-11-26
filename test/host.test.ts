@@ -70,6 +70,7 @@ test("a subagent whose profile loads no extensions answers from throwaway sessio
   assert.match(lastText(child.session), /child one$/);
   assert.notEqual(promptSid(), parentAcp);
   assert.equal(assistants(child.session).at(-1).responseId, undefined, "no ACP session of its own to continue");
+  assert.match(env.prompts().at(-1).params.prompt[0].text, /^\[pi: read-only session\./, "throwaway sessions are told to change nothing");
   await parent.session.prompt("parent two");
   assert.equal(promptSid(), parentAcp);
 });
@@ -195,6 +196,19 @@ test("/agy compact leaves Stop in force and waits for an open reply", async () =
   assert.equal(env.frames().find((f) => f.lateOutcome).lateOutcome, "deny");
   await sleep(300);
   assert.ok(!session.messages.some((m: any) => m.role === "custom" && m.customType === "agy-wake"));
+});
+
+test("a message sent while agy compacts takes over; the compaction reports the interruption", async () => {
+  const { session, mock } = await createSession(env);
+  await session.prompt("SCRIPT:slowcompact");
+  const sid = promptSid();
+  const compacting = session.prompt("/agy compact");
+  await until(() => compacts(sid).length === 1, 5000);
+  await session.prompt("hello");
+  await compacting;
+  assert.match(mock.calls.filter((c) => c.method === "notify").at(-1)!.args[0], /new message interrupted \/compact/);
+  assert.equal(assistants(session).at(-1).stopReason, "stop");
+  assert.equal(env.prompts().filter((p) => p.params.sessionId === sid && p.params.prompt[0]?.text === "hello").length, 1);
 });
 
 test("/agy compact after a restart resumes the chat's ACP session first", async () => {

@@ -199,6 +199,7 @@ export default function piAgyAcp(pi: ExtensionAPI) {
           }
           case "compact": {
             if (!isOurModel()) return notify("Select an Antigravity model first.", "warning");
+            notify("Asking agy to compact its context (this cannot be stopped; your next message interrupts it)…");
             const result = await compact();
             if (result === "none") return notify("No agy session for this conversation yet.");
             if (result === "busy") return notify("agy is still working; try again when it has finished.", "warning");

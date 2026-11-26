@@ -94,9 +94,9 @@ provider 不能假定“注册它的那个实例”就是发请求的会话，�
 
 所以按**请求属于谁的 agent run** 来找：请求带的 `options.signal` 就是那个 run 的中止信号，和实例的 `ctx.signal` 是同一个对象时，这个请求才是该会话的聊天请求。找不到这样的实例就是维护类请求。已销毁会话的 ctx 一访问就抛错，遇到就把它从 `instances` 里去掉。
 
-子代理的 profile 没开 `load_extensions` 时（pi-web 内置的三个 profile 默认如此），子会话里没有本扩展的实例：它的请求都按维护类处理，能回答，但没有镜像卡片、不能执行命令、每轮都是新的临时会话。要让子代理正常使用 agy 模型，profile 需要开 `load_extensions`。
+子代理的 profile 没开 `load_extensions` 时（pi-web 内置的三个 profile 默认如此），子会话里没有本扩展的实例：它的请求都按维护类处理，能回答，但没有镜像卡片、不能执行命令、每轮都是新的临时会话，工作目录取的是父会话的（不是子代理的隔离工作树）。要让子代理正常使用 agy 模型，profile 需要开 `load_extensions`。
 
-维护类请求（压缩摘要、自动命名等）走一次性的临时 ACP 会话：只要文字，权限一律拒绝，用完就 `session/close`；stopReason 的映射和正常对话相同，所以被配额拒绝或被 token 上限截断的摘要不会被保存。`disableContinuation` 的缓存预热请求直接返回空结果，不发给 agy；我们本来也不声明 promptCache。
+维护类请求（压缩摘要、自动命名等）走一次性的临时 ACP 会话：只要文字，权限一律拒绝，prompt 前带上只读说明（3.8），用完就 `session/close`；stopReason 的映射和正常对话相同，所以被配额拒绝或被 token 上限截断的摘要不会被保存。`disableContinuation` 的缓存预热请求直接返回空结果，不发给 agy；我们本来也不声明 promptCache。
 
 **持久化。** 每个 pi 会话一个旁路文件：`~/.pi/agent/pi-agy-acp/bindings/<piSessionId>.json`。
 
@@ -340,9 +340,11 @@ pi 的压缩只缩短 pi 自己的历史。锚点还在时 ACP 会话继续用�
 
 两路共用一段代码：
 
-- 用下一次请求会带的上下文（`buildSessionProjection()`）做锚点匹配，找到下一条消息会续接的那个 ACP 会话；冷启动时先 resume 并重设模型。被 pi 压缩掉的锚点不算数。当前模型不是 agy 时不做。
+- 用下一次请求会带的上下文（`buildSessionProjection()`）和聊天相同的规则做锚点匹配，找到下一条消息会续接的那个 ACP 会话；冷启动时先 resume 并重设模型。被 pi 压缩掉的锚点不算数。当前模型不是 agy 时不做。
 - 这个 ACP 会话上还有没被 pi 消费完的回复时不做（这时再发 prompt 会变成 steer，或者丢掉回复的尾部）。
-- `/compact` 不是一轮聊天：不建 turn，直接发 `session/prompt` 等结果，最多 5 分钟。期间 agy 主动说的话照常开一轮回复；聊天的 prompt 排在它后面发，免得被 agy 当成对压缩的 steer。
+- `/compact` 不是一轮聊天：不建 turn，直接发 `session/prompt` 等结果，最多 5 分钟。期间 agy 主动说的话照常开一轮回复；压缩这次调用自己的 `usage_update` 不记到任何回复上。
+- 压缩期间用户又发了消息：消息照常发出并接管（agy 原生就是新 prompt 顶掉旧的），压缩报告“被新消息打断”。不让聊天排队等压缩，排队会让已取消的输入、失效的会话在等待结束后仍被使用。
+- `/agy compact` 开始后不能用停止按钮取消（扩展命令拿不到宿主的取消信号），开始时会提示。
 - 不解除“已停止”状态：用户按停止之后，只有下一条用户消息才恢复权限放行，压缩不算。
 - 只有 `end_turn` 才算压缩成功。
 
