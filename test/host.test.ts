@@ -49,6 +49,15 @@ test("a subagent that loads the extension into its parent's model runtime does n
   await parent.session.prompt("parent three");
   assert.equal(promptSid(), parentAcp);
   assert.deepEqual(env.prompts().at(-1).params.prompt, [{ type: "text", text: "parent three" }]);
+  // the finished child stays registered as the provider: its disposed ctx throws on any access
+  child.session.dispose();
+  await parent.session.prompt("parent four");
+  assert.equal(promptSid(), parentAcp);
+  const src = parent.session.agent;
+  const side = new Agent({ initialState: { systemPrompt: "", model: src.state.model, thinkingLevel: "low", tools: [], messages: [...src.state.messages] }, convertToLlm: src.convertToLlm, streamFn: src.streamFunction, getApiKey: src.getApiKey, sessionId: src.sessionId } as any);
+  await side.prompt("a maintenance request through the dead child's registration");
+  assert.equal((side.state.messages.at(-1) as any).stopReason, "stop");
+  assert.equal(env.frames().findLast((f) => f.method === "session/new").params.cwd, env.cwd, "it runs in the session's directory");
 });
 
 test("a request made with the session's id outside its agent run (pi-web auto-name) stays out of the ACP session", async () => {

@@ -126,39 +126,48 @@ class Writer {
 export function createStreamSimple(inst: Instance) {
   return (model: Model<any>, context: { messages: any[] }, options?: SimpleStreamOptions): AssistantMessageEventStream => {
     const stream = createAssistantMessageEventStream();
-    void run(inst, model, context.messages ?? [], options ?? {}, stream);
+    // whatever goes wrong, the stream ends: pi waits on it forever otherwise
+    run(inst, model, context.messages ?? [], options ?? {}, stream).catch((err) => new Writer(stream, model).fail("error", err instanceof Error ? err.message : String(err)));
     return stream;
   };
 }
 
 /**
- * The instance whose pi session made this request. None for maintenance: another id (compaction,
- * summaries), or the session's id outside its agent run (pi-web's auto-name reuses the stream function).
+ * The instance whose pi session made this request, and a working directory for it. No instance for
+ * maintenance: another id (compaction, summaries), or the session's id outside its agent run
+ * (pi-web's auto-name reuses the session's stream function and id).
  */
-function servingInstance(registered: Instance, sid: string | undefined): Instance | undefined {
-  const serves = (i: Instance, side: boolean) => {
+function route(registered: Instance, sid: string | undefined): { inst?: Instance; cwd: string } {
+  const instances = registered.runtime.instances as Set<Instance>;
+  let cwd: string | undefined;
+  const serves = (i: Instance, side: boolean): boolean => {
     try {
       const ctx = i.ctx();
       const own = i.sessionId();
-      if (!ctx || !own || !sid || ctx.isIdle?.()) return false;
-      return sid === own || (side && sid === ctx.sessionManager?.getHeader?.()?.piWebSide?.parentSessionId);
+      if (!ctx || !own) return false;
+      if (i === registered) cwd ??= ctx.cwd;
+      if (!sid || (sid !== own && !(side && sid === ctx.sessionManager?.getHeader?.()?.piWebSide?.parentSessionId))) return false;
+      cwd = ctx.cwd;
+      return !ctx.isIdle?.();
     } catch {
-      return false; // a disposed session's ctx throws
+      instances.delete(i); // a disposed session's ctx throws
+      return false;
     }
   };
   // pi-web side chats route with their parent's id
-  if (serves(registered, true)) return registered;
-  // A provider belongs to a model runtime, and pi-web's subagents share their parent's: whichever
-  // instance registered last receives the requests of all of them.
-  return ([...registered.runtime.instances] as Instance[]).find((i) => serves(i, false));
+  const inst = serves(registered, true) ? registered
+    // A provider belongs to a model runtime, and pi-web's subagents share their parent's: whichever
+    // instance registered last receives the requests of all of them.
+    : [...instances].find((i) => serves(i, false));
+  return { inst, cwd: cwd ?? process.cwd() };
 }
 
 async function run(registered: Instance, model: Model<any>, messages: any[], options: SimpleStreamOptions, stream: AssistantMessageEventStream): Promise<void> {
   const rt = registered.runtime;
   // cache warming probe: never forward to a stateful agent
   if ((options as any).disableContinuation) return new Writer(stream, model).done("stop");
-  const inst = servingInstance(registered, (options as any).sessionId);
-  if (!inst) return runEphemeral(rt, model, messages, options, stream, registered.ctx()?.cwd ?? process.cwd());
+  const { inst, cwd } = route(registered, (options as any).sessionId);
+  if (!inst) return runEphemeral(rt, model, messages, options, stream, cwd);
   const ctx = inst.ctx();
   const own = inst.sessionId()!;
 
