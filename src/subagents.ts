@@ -177,7 +177,7 @@ function toolSpec(a: Available): object {
     name: TOOL,
     description: [
       "Delegate a task to a pi agent: a separate pi session, inspectable by the user, that can use another model (Claude, GPT, ...).",
-      "Only call this when the user explicitly asks to use a pi agent, a subagent, or a specific pi model. Never delegate on your own.",
+      "Only call this when the user explicitly asks for a pi agent or a model from pi. Never delegate on your own; a request for a subagent that does not mention pi is not for this tool.",
       "It returns at once with the agent's id and a shell command; run that command in the background to receive the report when the agent finishes.",
       "To give a finished agent a follow-up task, call this again with resume set to its id.",
       "",
