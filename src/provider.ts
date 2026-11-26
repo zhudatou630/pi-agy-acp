@@ -9,12 +9,14 @@ import { type AcpSession, addUsage, CANCEL_WAIT_MS, type Runtime, type SessionOw
 const BATCH_MS = 150;
 // agy maps only quota exhaustion to refusal; keep the raw reason as a fallback. Avoids pi's retry keywords.
 const QUOTA_MESSAGE = "Antigravity quota exhausted (agy stopReason: refusal). Wait for the quota to reset or switch models.";
+// agy never sees pi's tool list: a session without write-capable tools says so in words. Advisory, per request.
+const READ_ONLY_NOTE = "[pi: read-only session. For this request, do not modify files or run commands that change anything.]";
 
 /** What the provider needs from its extension instance. */
 export interface Instance extends SessionOwner {
   runtime: Runtime;
-  /** pi session id this instance serves, when a session is bound. */
-  sessionId(): string | undefined;
+  /** No write-capable pi tool is active (pi-web's read-only preset, explore subagents). */
+  readOnly(): boolean;
   /** Remember which ACP session serves this pi session (for steer and questions). */
   attach(session: AcpSession | undefined, file: BindingFile | undefined, binding: Binding | undefined): void;
   session(): AcpSession | undefined;
@@ -128,16 +130,36 @@ export function createStreamSimple(inst: Instance) {
   };
 }
 
-async function run(inst: Instance, model: Model<any>, messages: any[], options: SimpleStreamOptions, stream: AssistantMessageEventStream): Promise<void> {
-  const rt = inst.runtime;
+/**
+ * The instance whose pi session made this request. None for maintenance: another id (compaction,
+ * summaries), or the session's id outside its agent run (pi-web's auto-name reuses the stream function).
+ */
+function servingInstance(registered: Instance, sid: string | undefined): Instance | undefined {
+  const serves = (i: Instance, side: boolean) => {
+    try {
+      const ctx = i.ctx();
+      const own = i.sessionId();
+      if (!ctx || !own || !sid || ctx.isIdle?.()) return false;
+      return sid === own || (side && sid === ctx.sessionManager?.getHeader?.()?.piWebSide?.parentSessionId);
+    } catch {
+      return false; // a disposed session's ctx throws
+    }
+  };
+  // pi-web side chats route with their parent's id
+  if (serves(registered, true)) return registered;
+  // A provider belongs to a model runtime, and pi-web's subagents share their parent's: whichever
+  // instance registered last receives the requests of all of them.
+  return ([...registered.runtime.instances] as Instance[]).find((i) => serves(i, false));
+}
+
+async function run(registered: Instance, model: Model<any>, messages: any[], options: SimpleStreamOptions, stream: AssistantMessageEventStream): Promise<void> {
+  const rt = registered.runtime;
   // cache warming probe: never forward to a stateful agent
   if ((options as any).disableContinuation) return new Writer(stream, model).done("stop");
+  const inst = servingInstance(registered, (options as any).sessionId);
+  if (!inst) return runEphemeral(rt, model, messages, options, stream, registered.ctx()?.cwd ?? process.cwd());
   const ctx = inst.ctx();
-  const own = inst.sessionId();
-  const sid = (options as any).sessionId as string | undefined;
-  // pi-web side chats route with their parent's id; any other id (compaction, summaries) is maintenance
-  const isSession = !!ctx && !!own && !!sid && (sid === own || sid === ctx.sessionManager?.getHeader?.()?.piWebSide?.parentSessionId);
-  if (!isSession) return runEphemeral(rt, model, messages, options, stream, ctx?.cwd ?? process.cwd());
+  const own = inst.sessionId()!;
 
   const signal = options.signal;
   let writer: Writer | undefined;
@@ -186,7 +208,8 @@ async function run(inst: Instance, model: Model<any>, messages: any[], options: 
     if (!turn) {
       if (!blocks.length) return finish(rt, file, b!, writer, "stop"); // nothing new for agy
       const transcript = history.length ? historyTranscript(history, REPLAY_MAX_CHARS, messages) : "";
-      const prompt: AcpBlock[] = transcript ? [{ type: "text", text: transcript }, ...blocks] : blocks;
+      const prompt: AcpBlock[] = [transcript, inst.readOnly() ? READ_ONLY_NOTE : ""].filter(Boolean).map((text) => ({ type: "text" as const, text }));
+      prompt.push(...blocks);
       const key = inputHash(JSON.stringify(prompt));
       if (b!.failedKey === key) {
         // pi retries "transient" errors by resending; agy may already have acted on this prompt
@@ -229,6 +252,15 @@ async function applyPayloadHook(options: SimpleStreamOptions, payload: { session
   return replaced && Array.isArray(replaced.prompt) ? replaced : payload;
 }
 
+/** How a turn ended, for chat and maintenance requests alike. */
+function turnOutcome(turn: Turn, item: { result?: any; error?: Error }): { done: "stop" | "length" } | { fail: "error" | "aborted"; message: string } {
+  const stop = item.result?.stopReason;
+  if (turn.cancelled || stop === "cancelled") return { fail: "aborted", message: "Cancelled" };
+  if (item.error) return { fail: "error", message: item.error.message };
+  if (stop === "refusal") return { fail: "error", message: QUOTA_MESSAGE };
+  return { done: stop === "max_tokens" || stop === "max_turn_requests" ? "length" : "stop" };
+}
+
 /** `used`: context size from the last usage_update; `acp`: the prompt result's usage. */
 interface Usage {
   used?: number;
@@ -259,17 +291,15 @@ async function pump(rt: Runtime, s: AcpSession, turn: Turn, writer: Writer, file
       if (item.kind === "yield") return finish(rt, file, b, writer, "stop");
       if (item.kind === "end") {
         turn.closed = true;
-        const stop = item.result?.stopReason;
         const usage = { used: s.usage.used, acp: addUsage(turn.carriedUsage, item.result?.usage) };
-        if (turn.cancelled || stop === "cancelled") return failWith(rt, file, b, writer, "aborted", "Cancelled");
-        if (item.error) {
-          b.failedKey = turn.promptKey;
-          return failWith(rt, file, b, writer, "error", item.error.message, usage);
+        const end = turnOutcome(turn, item);
+        if ("fail" in end) {
+          if (end.fail === "aborted") return failWith(rt, file, b, writer, "aborted", end.message);
+          if (item.error) b.failedKey = turn.promptKey;
+          return failWith(rt, file, b, writer, "error", end.message, usage);
         }
-        if (stop === "refusal") return failWith(rt, file, b, writer, "error", QUOTA_MESSAGE, usage);
         b.failedKey = undefined;
-        const reason = stop === "max_tokens" || stop === "max_turn_requests" ? "length" : "stop";
-        return finish(rt, file, b, writer, reason, usage);
+        return finish(rt, file, b, writer, end.done, usage);
       }
       const u = item.update;
       await (options as any).onProviderStreamEvent?.(u, model);
@@ -317,7 +347,8 @@ function emitMirror(s: AcpSession, writer: Writer, id: string): boolean {
   return true;
 }
 
-async function drainAborted(rt: Runtime, s: AcpSession, turn: Turn, writer: Writer, file: BindingFile, b: Binding): Promise<void> {
+/** Cancel and wait for agy to end the turn; one that never ends leaves the session broken. */
+async function cancelAndDrain(rt: Runtime, s: AcpSession, turn: Turn): Promise<void> {
   rt.cancel(s);
   const deadline = Date.now() + CANCEL_WAIT_MS;
   while (!turn.closed) {
@@ -327,7 +358,47 @@ async function drainAborted(rt: Runtime, s: AcpSession, turn: Turn, writer: Writ
     if (item.kind === "end") turn.closed = true;
   }
   turn.closed = true;
+}
+
+async function drainAborted(rt: Runtime, s: AcpSession, turn: Turn, writer: Writer, file: BindingFile, b: Binding): Promise<void> {
+  await cancelAndDrain(rt, s, turn);
   failWith(rt, file, b, writer, "aborted", "Cancelled");
+}
+
+/**
+ * Run agy's own /compact in the ACP session of this pi session's current branch. pi's compaction
+ * only shortens pi's history: the ACP session keeps its whole context until agy compacts it.
+ * Returns "none" when the branch has no ACP session, "busy" while agy is working in it.
+ */
+export async function compactAgy(inst: Instance, want: { model?: string; piLevel?: string }, signal?: AbortSignal): Promise<"done" | "none" | "busy"> {
+  const rt = inst.runtime;
+  const ctx = inst.ctx();
+  const own = inst.sessionId();
+  if (!ctx || !own) return "none";
+  const file = rt.store.load(own);
+  const branch = ctx.sessionManager.getBranch().flatMap((e: any) => (e.type === "message" ? [e.message] : []));
+  const match = matchBinding(file, branch);
+  if (!match || match.anchor < 0) return "none";
+  const session = await rt.resumeSession(match.binding.acpSessionId, match.binding.cwd);
+  if (!session) return "none";
+  if (session.turn && !session.turn.ended) return "busy"; // a prompt now would steer that turn
+  session.owner = inst;
+  inst.attach(session, file, match.binding);
+  await rt.applyConfig(session, want); // agy resets the model on resume
+  if (signal?.aborted) throw new Error("Cancelled");
+  const turn = await rt.prompt(session, [{ type: "text", text: "/compact" }]);
+  for (;;) {
+    const item = await turn.queue.next(undefined, signal);
+    if (item === TIMEOUT) {
+      await cancelAndDrain(rt, session, turn);
+      throw new Error("Cancelled");
+    }
+    if (item.kind !== "end") continue;
+    turn.closed = true;
+    const end = turnOutcome(turn, item);
+    if ("fail" in end) throw new Error(end.message);
+    return "done";
+  }
 }
 
 /** Requests outside the pi session (compaction, summaries): one-shot session, text only, tools denied. */
@@ -352,10 +423,10 @@ async function runEphemeral(rt: Runtime, model: Model<any>, messages: any[], opt
       if (item.kind === "end") {
         turn.closed = true;
         const usage = { used: session.usage.used, acp: item.result?.usage };
-        if (turn.cancelled || item.result?.stopReason === "cancelled") writer.fail("aborted", "Cancelled");
-        else if (item.error) writer.fail("error", item.error.message, usage);
-        else if (item.result?.stopReason === "refusal") writer.fail("error", QUOTA_MESSAGE, usage); // no partial summary
-        else writer.done("stop", usage);
+        const end = turnOutcome(turn, item);
+        // pi saves only a "stop" summary: a refused or cut-off one must not become a checkpoint
+        if ("done" in end) writer.done(end.done, usage);
+        else writer.fail(end.fail, end.message, end.fail === "aborted" ? undefined : usage);
         return;
       }
       if (item.kind === "update") appendChunk(writer, item.update);

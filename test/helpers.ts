@@ -53,7 +53,8 @@ export function mockUI(): { ui: any; mock: MockUI } {
   return { ui, mock };
 }
 
-export async function createSession(env: Env, opts: { entries?: any[]; model?: string; thinking?: string; settings?: Record<string, unknown> } = {}) {
+/** `modelRuntime`: share another session's runtime, as pi-web does for subagents. */
+export async function createSession(env: Env, opts: { entries?: any[]; model?: string; thinking?: string; settings?: Record<string, unknown>; modelRuntime?: unknown } = {}) {
   const sdk = await import("@earendil-works/pi-coding-agent");
   const agentDir = path.join(env.root, "agent");
   fs.mkdirSync(agentDir, { recursive: true });
@@ -62,6 +63,7 @@ export async function createSession(env: Env, opts: { entries?: any[]; model?: s
     cwd: env.cwd,
     agentDir,
     settingsManager,
+    ...(opts.modelRuntime ? { modelRuntime: opts.modelRuntime as any } : {}),
     resourceLoaderOptions: { additionalExtensionPaths: [EXTENSION] },
   });
   const model = services.modelRuntime.getModel("antigravity", opts.model ?? "gemini-3.8-flash");

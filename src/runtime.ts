@@ -8,7 +8,7 @@ import { type Catalog, loadCatalog, mapThinkingLevel, saveCatalog } from "./cata
 import { DebugLog } from "./debug.ts";
 import { isTerminal, mergeToolUpdate, type ToolState } from "./mirror.ts";
 
-export const VERSION = "0.2.4";
+export const VERSION = "0.3.0";
 
 /** ~/.pi/agent/pi-agy-acp/config.json */
 export interface RuntimeConfig {
@@ -161,6 +161,8 @@ function holdsTurn(t: ToolState): boolean {
 /** What the runtime needs from the pi side of a session (one extension instance). */
 export interface SessionOwner {
   ctx(): any | undefined;
+  /** pi session id this instance serves, when a session is bound. */
+  sessionId(): string | undefined;
   onTitle?(title: string): void;
   /** agy started talking on its own (a background command finished) with no reply open in pi. */
   onWake?(): void;
@@ -276,6 +278,8 @@ export class Runtime {
   readonly sessions = new Map<string, AcpSession>();
   /** Catalog-change callbacks of live sessions. */
   readonly listeners = new Set<() => void>();
+  /** Extension instances of live sessions: a request finds its own by pi session id. */
+  readonly instances = new Set<SessionOwner>();
   private idleTimer: NodeJS.Timeout | undefined;
   private catalogRefresh: Promise<Catalog> | undefined;
   lastExit: string | undefined;

@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import { type Binding, type BindingFile, inputHash } from "./bindings.ts";
 import { PROVIDER_ID, toPiModels } from "./catalog.ts";
 import { MIRROR_TOOLS, mirrorResult } from "./mirror.ts";
-import { createStreamSimple, type Instance } from "./provider.ts";
+import { compactAgy, createStreamSimple, type Instance } from "./provider.ts";
 import { type AcpSession, getRuntime, type Runtime } from "./runtime.ts";
 
 const MIRROR_LABELS: Record<string, string> = {
@@ -17,6 +17,9 @@ const MIRROR_LABELS: Record<string, string> = {
   agy_tool: "agy tool",
   agy_todo: "agy plan",
 };
+
+/** pi's write-capable built-ins; a session with none active is read-only (pi-web's preset uses the same rule). */
+const WRITE_TOOLS = ["bash", "powershell", "edit", "write"];
 
 export default function piAgyAcp(pi: ExtensionAPI) {
   const rt = getRuntime();
@@ -33,6 +36,7 @@ export default function piAgyAcp(pi: ExtensionAPI) {
       try { if (!pi.getSessionName()) pi.setSessionName(title); } catch {}
     },
     onWake: () => wake(),
+    readOnly: () => !pi.getActiveTools().some((name) => WRITE_TOOLS.includes(name)),
     attach: (s, f, b) => {
       // another branch's ACP session no longer reports into this pi session
       if (session && session !== s && session.owner === inst) session.owner = undefined;
@@ -42,6 +46,7 @@ export default function piAgyAcp(pi: ExtensionAPI) {
   };
 
   const isOurModel = () => ctx?.model?.provider === PROVIDER_ID;
+  const compact = (signal?: AbortSignal) => compactAgy(inst, { model: ctx.model.id, piLevel: pi.getThinkingLevel() }, signal);
 
   // agy talks on its own (a background job finished) and no pi reply is open: start one so the
   // report shows up now. Busy (finishing a reply, compacting): queue it, or retry shortly.
@@ -144,14 +149,26 @@ export default function piAgyAcp(pi: ExtensionAPI) {
     messages: event.messages.filter((m: any) => !(m.role === "custom" && m.customType === "agy-wake")),
   }));
 
+  // pi's /compact (and pi-web's button) shortens pi's history only: compact the agy session too,
+  // then let pi summarize as usual. Other models in this session read pi's history.
+  pi.on("session_before_compact", async (event: any, c: any) => {
+    ctx = c;
+    if (!isOurModel()) return;
+    try {
+      await compact(event.signal);
+    } catch (err) {
+      if (!event.signal?.aborted) c.ui?.notify?.(`agy /compact failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
+    }
+  });
+
   // live sessions follow catalog changes; services-only loads (pi-web's model list) never subscribe
   const onCatalog = () => registerProvider();
-  pi.on("session_start", () => { rt.listeners.add(onCatalog); });
+  pi.on("session_start", () => { rt.listeners.add(onCatalog); rt.instances.add(inst); });
 
   pi.registerCommand("agy", {
-    description: "Antigravity: status | models refresh | login | new | debug on|off | restart",
+    description: "Antigravity: status | models refresh | login | new | compact | debug on|off | restart",
     getArgumentCompletions: (prefix: string) => {
-      const items = ["status", "models refresh", "login", "new", "debug on", "debug off", "restart"];
+      const items = ["status", "models refresh", "login", "new", "compact", "debug on", "debug off", "restart"];
       return items.filter((i) => i.startsWith(prefix)).map((value) => ({ value, label: value }));
     },
     handler: async (args, c) => {
@@ -178,6 +195,13 @@ export default function piAgyAcp(pi: ExtensionAPI) {
             if (old) await rt.closeSession(old.id);
             return notify("Detached from the agy session; the next message starts a new one with the conversation transcript.");
           }
+          case "compact": {
+            if (!isOurModel()) return notify("Select an Antigravity model first.", "warning");
+            const result = await compact();
+            if (result === "none") return notify("No agy session for this conversation yet.");
+            if (result === "busy") return notify("agy is still working; try again when it has finished.", "warning");
+            return notify("agy compacted its context. The context ring updates with the next reply; pi's own history is unchanged.");
+          }
           case "debug": {
             if (arg === "off") { rt.debug.disable(); return notify("ACP capture off"); }
             return notify(`ACP capture on: ${rt.debug.enable()}`);
@@ -202,6 +226,7 @@ export default function piAgyAcp(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", () => {
     rt.listeners.delete(onCatalog);
+    rt.instances.delete(inst);
     if (session?.owner === inst) session.owner = undefined;
     rt.armIdle();
   });

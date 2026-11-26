@@ -1,4 +1,4 @@
-// /tree navigation, model/effort switches and pi compaction keep the right ACP session.
+// /tree navigation and model/effort switches keep the right ACP session; failed summaries are not saved.
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { createSession, lastText, runtime, setupEnv } from "./helpers.ts";
@@ -42,25 +42,16 @@ test("switching agy model / thinking level re-applies config on the same session
   assert.match(lastText(session), /^echo\[gemini-4-neon\/xhigh\/default\]/);
 });
 
-test("pi compaction runs in a throwaway session and the chat keeps its ACP session", async () => {
-  const { session } = await createSession(env, { settings: { compaction: { enabled: false, keepRecentTokens: 50, reserveTokens: 100 } } });
-  for (const t of ["a", "b", "c", "d"]) await session.prompt(`turn ${t} ` + "lorem ipsum ".repeat(400));
-  const sid = promptSid();
-  const before = env.frames().length;
-  await session.compact();
-  const fresh = env.frames().slice(before);
-  const summaryPrompt = fresh.find((f) => f.method === "session/prompt");
-  assert.ok(summaryPrompt, "compaction reached agy");
-  assert.notEqual(summaryPrompt.params.sessionId, sid);
-  assert.ok(fresh.some((f) => f.method === "session/close" && f.params.sessionId === summaryPrompt.params.sessionId));
-  await session.prompt("after compaction");
-  assert.equal(promptSid(), sid);
-  assert.deepEqual(env.prompts().at(-1).params.prompt, [{ type: "text", text: "after compaction" }]);
-});
-
 test("compaction that hits agy's quota (refusal) fails instead of saving a partial summary", async () => {
   const { session } = await createSession(env, { settings: { compaction: { enabled: false, keepRecentTokens: 50, reserveTokens: 100 } } });
   await session.prompt("SCRIPT:refusal " + "lorem ipsum ".repeat(400));
   for (const t of ["b", "c", "d"]) await session.prompt(`turn ${t} ` + "lorem ipsum ".repeat(400));
   await assert.rejects(session.compact(), /quota exhausted/);
+});
+
+test("compaction cut off at agy's token limit fails instead of saving a partial summary", async () => {
+  const { session } = await createSession(env, { settings: { compaction: { enabled: false, keepRecentTokens: 50, reserveTokens: 100 } } });
+  await session.prompt("SCRIPT:maxtokens " + "lorem ipsum ".repeat(400));
+  for (const t of ["b", "c", "d"]) await session.prompt(`turn ${t} ` + "lorem ipsum ".repeat(400));
+  await assert.rejects(session.compact(), /summary is incomplete/);
 });

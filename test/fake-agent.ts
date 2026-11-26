@@ -83,6 +83,11 @@ function serve() {
       u({ sessionUpdate: "usage_update", used: 1234, size: 1048576 });
       send({ jsonrpc: "2.0", id: run.promptId, result: { stopReason, usage: { inputTokens: 900, outputTokens: 34, cachedReadTokens: 6000, cachedWriteTokens: 50, thoughtTokens: 20, totalTokens: 99999 } } });
     };
+    if (text.trim() === "/compact") {
+      // like agy 1.5.14: no updates at all, only the prompt result
+      running.delete(sessionId);
+      return send({ jsonrpc: "2.0", id: run.promptId, result: { stopReason: "end_turn", usage: { inputTokens: 500, outputTokens: 80, totalTokens: 580 } } });
+    }
     const script = /SCRIPT:(\w+)/.exec(text)?.[1];
     const cwd = "/tmp/fake-ws";
     switch (script) {
