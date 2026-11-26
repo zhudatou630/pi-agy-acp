@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import { isContextOverflow } from "@earendil-works/pi-ai";
 import { assistants, createSession, lastText, runtime, setupEnv, sleep, until } from "./helpers.ts";
 
-const env = setupEnv("e2e");
+const env = setupEnv("e2e", {}, { wakeSettle: 400 });
 after(async () => { await runtime()?.shutdown(); });
 
 test("text + thinking stream; only the user's text reaches agy", async () => {

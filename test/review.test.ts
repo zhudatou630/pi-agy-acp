@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { assistants, createSession, lastText, runtime, setupEnv, sleep, until } from "./helpers.ts";
 
-const env = setupEnv("review");
+const SETTLE = 400;
+const env = setupEnv("review", {}, { wakeSettle: SETTLE, cancelWait: 1500 });
 after(async () => { await runtime()?.shutdown(); });
 
 const promptsWith = (s: string) => env.prompts().filter((p) => JSON.stringify(p.params.prompt).includes(s));
@@ -81,7 +82,7 @@ test("a prompt agy never answers after Stop does not keep agy from idle shutdown
   await until(() => promptsWith("SCRIPT:hang").length === 1, 5000);
   await sleep(200);
   await session.abort();
-  await run; // gives up after CANCEL_WAIT_MS
+  await run; // gives up after the cancel wait
   const rt = runtime();
   assert.equal(assistants(session).at(-1).stopReason, "aborted");
   assert.equal(rt.busy(), false, "the abandoned prompt must not hold the process");
@@ -161,7 +162,7 @@ test("a question during agy's own report waits for the user instead of ending on
   const { session, mock } = await createSession(env);
   let silenceTimerWhileAsking: unknown = "unchecked";
   mock.answers.select = (async (options: string[]) => {
-    // a real wait would have to outlast WAKE_QUIET_MS; check the silence timer is off instead
+    // a real wait would have to outlast the quiet fallback; check the silence timer is off instead
     const turn = [...runtime().sessions.values()].map((s: any) => s.activeTurn).find((t: any) => t?.pendingPermissions > 0);
     silenceTimerWhileAsking = turn ? turn.wakeTimer : "no waiting turn";
     return options.find((o) => o === "Blue");
@@ -188,7 +189,7 @@ test("agy's own multi-step work after a background command stays one reply and k
   assert.ok(Date.now() - t0 < 10_000, "agy's closing usage_update ends the reply soon, not the silence fallback");
   assert.ok(!session.messages.some((m: any) => m.role === "custom" && m.customType === "agy-wake"), "a silent step must not split the work into wake replies");
   assert.match(lastText(session), /all steps done/);
-  assert.ok(armed.some((t) => t - t0 > 3500), "agy's unprompted updates push idle shutdown back");
+  assert.ok(armed.some((t) => t - t0 > SETTLE * 2), "agy's unprompted updates push idle shutdown back");
 });
 
 test("a command agy reruns on its own holds the reply until agy reports on it", async () => {

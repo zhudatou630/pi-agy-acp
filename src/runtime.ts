@@ -7,6 +7,7 @@ import { BindingStore } from "./bindings.ts";
 import { type Catalog, loadCatalog, mapThinkingLevel, saveCatalog } from "./catalog.ts";
 import { DebugLog } from "./debug.ts";
 import { isTerminal, mergeToolUpdate, type ToolState } from "./mirror.ts";
+import { holdsTurn, runsForever, TIMING, type Timing, Turn } from "./turn.ts";
 
 export const VERSION = "0.3.0";
 
@@ -17,19 +18,8 @@ export interface RuntimeConfig {
   extraArgs: string[];
 }
 
-export const CANCEL_WAIT_MS = 10_000;
 /** Resume after a restart is lossless but pays agy's ~2.5 s warmup; one idle process is ~230 MB. */
 const IDLE_SHUTDOWN_MS = 30 * 60_000;
-const WATCHDOG_MS = 600_000;
-/** After a background command finishes, how long agy may take to start its own report. */
-const WAKE_GRACE_MS = 20_000;
-/** agy ends every model call with usage_update, followed at once by that call's tool calls, if any.
- *  When nothing follows for this long, agy's own work is over (it sends no prompt response). */
-const WAKE_SETTLE_MS = 2_000;
-/** Fallback when agy goes quiet without a closing usage_update. It can generate silently for minutes. */
-const WAKE_QUIET_MS = 120_000;
-/** agy can drop a background command's final status: stop holding the reply after this much silence. */
-const HOLD_SILENT_MS = 30 * 60_000;
 
 /** Sum of two ACP prompt usages (field by field); either may be missing. */
 export function addUsage(a: any, b: any): any {
@@ -58,105 +48,6 @@ export function isAuthError(err: unknown): boolean {
 }
 
 // ---------------------------------------------------------------------------
-
-// Symbol.for: extension instances (and /reload) re-evaluate this module, the shared runtime does not.
-const TIMEOUT = Symbol.for("pi-agy-acp.timeout");
-
-export class AsyncQueue<T> {
-  private items: T[] = [];
-  private waiter: ((v: T | typeof TIMEOUT) => void) | undefined;
-
-  push(item: T): void {
-    if (this.waiter) {
-      const w = this.waiter;
-      this.waiter = undefined;
-      w(item);
-    } else this.items.push(item);
-  }
-
-  unshift(item: T): void {
-    this.items.unshift(item);
-  }
-
-  /** Queue before a not-yet-consumed end (late output joins the reply it belongs to). */
-  insertBeforeEnd(item: T): void {
-    const at = this.items.findIndex((x: any) => x?.kind === "end");
-    if (at < 0) this.push(item);
-    else this.items.splice(at, 0, item);
-  }
-
-  /** Take whatever is queued right now. */
-  drain(): T[] {
-    return this.items.splice(0);
-  }
-
-  next(timeoutMs?: number, signal?: AbortSignal): Promise<T | typeof TIMEOUT> {
-    if (this.items.length) return Promise.resolve(this.items.shift()!);
-    return new Promise((resolve) => {
-      let timer: NodeJS.Timeout | undefined;
-      const finish = (v: T | typeof TIMEOUT) => {
-        if (timer) clearTimeout(timer);
-        signal?.removeEventListener("abort", onAbort);
-        this.waiter = undefined;
-        resolve(v);
-      };
-      const onAbort = () => finish(TIMEOUT);
-      this.waiter = finish;
-      if (timeoutMs !== undefined) timer = setTimeout(() => finish(TIMEOUT), timeoutMs);
-      signal?.addEventListener("abort", onAbort, { once: true });
-    });
-  }
-}
-export { TIMEOUT };
-
-export type TurnItem =
-  | { kind: "update"; update: any }
-  | { kind: "end"; result?: any; error?: Error }
-  | { kind: "yield" };
-
-export class Turn {
-  readonly queue = new AsyncQueue<TurnItem>();
-  latestPrompt = 0;
-  ended = false;
-  /** The end item has been consumed by a provider stream. */
-  closed = false;
-  cancelled = false;
-  /** A provider stream is consuming the queue (steer may interrupt it). */
-  pumping = false;
-  pendingPermissions = 0;
-  /** Hashes of user inputs sent to agy directly by an immediate steer, one entry per send. */
-  readonly delivered: string[] = [];
-  /** Hash of the prompt that opened the turn (retry guard). */
-  promptKey = "";
-  lastPlan = "";
-  /**
-   * The prompt has returned but agy still owes a reply: a command it moved to the background is
-   * running (it reports when done), or agy started talking on its own. Ends on silence.
-   */
-  awaitingWake = false;
-  /** agy has started its own report. */
-  woke = false;
-  /** During its own report, agy's last model call ended (usage_update) and nothing followed yet. */
-  stepDone = false;
-  endResult: any;
-  /** Usage reported by prompts a steer superseded; added to the final prompt's. */
-  carriedUsage: any;
-  wakeTimer: NodeJS.Timeout | undefined;
-  readonly abort = new AbortController();
-  /** Monotonic (performance.now): host sleep and wall-clock changes are not agy silence. */
-  lastActivity = performance.now();
-}
-
-/** Daemons and timers: they may never finish, so nothing waits for them. */
-function runsForever(t: ToolState): boolean {
-  return (t.kind === "execute" && t.rawInput?.IsDaemon === true)
-    || t.name === "schedule" || t.title === "Run schedule" || t.title === "Running schedule";
-}
-
-/** A command agy moved to the background that finishes on its own. */
-function holdsTurn(t: ToolState): boolean {
-  return !isTerminal(t) && t.kind === "execute" && !runsForever(t);
-}
 
 /** What the runtime needs from the pi side of a session (one extension instance). */
 export interface SessionOwner {
@@ -207,6 +98,11 @@ export class AcpSession {
 
   get activeTurn(): Turn | undefined {
     return this.turn && !this.turn.closed ? this.turn : undefined;
+  }
+
+  get toolsRunning(): boolean {
+    for (const t of this.tools.values()) if (!isTerminal(t)) return true;
+    return false;
   }
 
   notifyTool(id: string): void {
@@ -280,6 +176,7 @@ export class Runtime {
   readonly listeners = new Set<() => void>();
   /** Extension instances of live sessions: a request finds its own by pi session id. */
   readonly instances = new Set<SessionOwner>();
+  readonly timing: Timing = { ...TIMING };
   private idleTimer: NodeJS.Timeout | undefined;
   private catalogRefresh: Promise<Catalog> | undefined;
   lastExit: string | undefined;
@@ -467,9 +364,7 @@ export class Runtime {
     }
     const n = ++turn.latestPrompt;
     turn.lastActivity = performance.now();
-    turn.awaitingWake = false; // a prompt is in flight again (steer)
-    turn.woke = false;
-    turn.stepDone = false;
+    turn.phase = "prompt"; // a prompt is in flight again (steer)
     clearTimeout(turn.wakeTimer);
     s.stopped = false;
     proc.request("session/prompt", { sessionId: s.id, prompt: blocks }).then(
@@ -488,7 +383,7 @@ export class Runtime {
     if (!s.ephemeral && !turn.cancelled && item.result?.stopReason === "end_turn" && [...s.tools.values()].some(holdsTurn)) {
       // agy moved a command to the background and reports when it is done: keep the pi reply
       // open, like pi's own bash. Daemons and schedules do not hold it.
-      turn.awaitingWake = true;
+      turn.phase = "grace";
       turn.endResult = item.result;
       s.settleTools((t) => { if (!holdsTurn(t)) t.background = true; });
       return;
@@ -523,8 +418,7 @@ export class Runtime {
   /** A reply agy starts on its own (no prompt): opened in pi through the owner. */
   private startWake(s: AcpSession): Turn {
     const turn = new Turn();
-    turn.awaitingWake = true;
-    turn.woke = true;
+    turn.phase = "quiet";
     turn.endResult = { stopReason: "end_turn" };
     s.turn = turn;
     s.pruneTools();
@@ -536,12 +430,10 @@ export class Runtime {
 
   /** While agy owes a reply: end it once nothing runs and agy has been quiet for a moment. */
   private wakeCheck(s: AcpSession, turn: Turn): void {
-    if (!turn.awaitingWake || turn.ended) return;
     clearTimeout(turn.wakeTimer);
     turn.wakeTimer = undefined;
-    if (turn.pendingPermissions > 0 || [...s.tools.values()].some((t) => !isTerminal(t))) return;
-    const wait = !turn.woke ? WAKE_GRACE_MS : turn.stepDone ? WAKE_SETTLE_MS : WAKE_QUIET_MS;
-    turn.wakeTimer = setTimeout(() => this.finishTurn(s, turn, { result: turn.endResult }), wait);
+    const wait = turn.wakeDelay(s.toolsRunning, this.timing);
+    if (wait !== undefined) turn.wakeTimer = setTimeout(() => this.finishTurn(s, turn, { result: turn.endResult }), wait);
   }
 
   cancel(s: AcpSession): void {
@@ -563,20 +455,17 @@ export class Runtime {
   /** One watchdog check; false once the turn is over. */
   watchdog(s: AcpSession, turn: Turn): boolean {
     if (turn.ended) return false;
-    const silent = performance.now() - turn.lastActivity;
-    if (turn.awaitingWake && turn.pendingPermissions === 0 && silent > HOLD_SILENT_MS) {
+    const verdict = turn.watchdog(s.toolsRunning, performance.now(), this.timing);
+    if (verdict === "ok") return true;
+    if (verdict === "release") {
       // no cancel: the command may still be running, and agy's later report opens a new reply
       this.finishTurn(s, turn, { result: turn.endResult });
-      return false;
-    }
-    const busy = turn.pendingPermissions > 0 || [...s.tools.values()].some((t) => !isTerminal(t));
-    if (!busy && silent > WATCHDOG_MS) {
+    } else {
       this.cancel(s);
-      this.endTurnNow(s, new Error(`agy produced no output for ${WATCHDOG_MS / 60000} minutes; cancelled this turn`));
+      this.endTurnNow(s, new Error(`agy produced no output for ${this.timing.watchdog / 60000} minutes; cancelled this turn`));
       s.broken = true;
-      return false;
     }
-    return true;
+    return false;
   }
 
   // -- inbound ---------------------------------------------------------------
@@ -603,9 +492,8 @@ export class Runtime {
     }
     if (turn) {
       turn.lastActivity = performance.now();
-      if (speaks && turn.awaitingWake) turn.woke = true;
-      if (u.sessionUpdate === "usage_update") turn.stepDone = turn.woke;
-      else if (speaks) turn.stepDone = false;
+      if (u.sessionUpdate === "usage_update") turn.note("usage");
+      else if (speaks) turn.note("speaks");
     }
     switch (u.sessionUpdate) {
       case "tool_call":
@@ -614,8 +502,7 @@ export class Runtime {
         const held = !!prev && holdsTurn(prev); // before the merge, which updates prev in place
         const state = mergeToolUpdate(prev, u);
         s.tools.set(state.id, state);
-        // agy reports on a finished command in new model calls: steps closed before it ended do not count
-        if (turn?.awaitingWake && held && isTerminal(state)) turn.woke = turn.stepDone = false;
+        if (held && isTerminal(state)) turn?.note("command-done");
         // nothing waits for daemons/timers once agy has handed control back, or for tools outside a reply
         if (!isTerminal(state) && (!turn || (turn.awaitingWake && runsForever(state)))) state.background = true;
         s.notifyTool(state.id);
@@ -675,7 +562,7 @@ export class Runtime {
       turn.pendingPermissions++;
       clearTimeout(turn.wakeTimer); // a reply waiting on the user does not end on silence
       turn.wakeTimer = undefined;
-      turn.stepDone = false; // after the answer agy generates its next step
+      turn.note("question");
     }
     try {
       const ctx = s.owner?.ctx();

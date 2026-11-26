@@ -10,6 +10,8 @@ export const FAKE_AGY = path.join(here, "fake-agy");
 export const EXTENSION = path.join(here, "../src/index.ts");
 
 export interface Env {
+  /** Shortened turn-engine waits for this test file (the fake agy paces itself by FAKE_SETTLE_MS). */
+  timing?: Record<string, number>;
   root: string;
   home: string;
   cwd: string;
@@ -20,7 +22,7 @@ export interface Env {
 }
 
 /** Must run before the extension is loaded: the runtime singleton reads these once. */
-export function setupEnv(name: string, config: Record<string, unknown> = {}): Env {
+export function setupEnv(name: string, config: Record<string, unknown> = {}, timing?: Record<string, number>): Env {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `agyacp-${name}-`));
   const home = path.join(root, "home");
   const cwd = path.join(root, "ws");
@@ -32,8 +34,9 @@ export function setupEnv(name: string, config: Record<string, unknown> = {}): En
   process.env.PI_AGY_ACP_HOME = home;
   process.env.FAKE_LOG = logFile;
   process.env.FAKE_STATE = stateFile;
+  if (timing?.wakeSettle) process.env.FAKE_SETTLE_MS = String(timing.wakeSettle);
   const frames = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
-  return { root, home, cwd, logFile, stateFile, frames, prompts: () => frames().filter((f) => f.method === "session/prompt") };
+  return { timing, root, home, cwd, logFile, stateFile, frames, prompts: () => frames().filter((f) => f.method === "session/prompt") };
 }
 
 export interface MockUI {
@@ -66,6 +69,7 @@ export async function createSession(env: Env, opts: { entries?: any[]; model?: s
     ...(opts.modelRuntime ? { modelRuntime: opts.modelRuntime as any } : {}),
     resourceLoaderOptions: { additionalExtensionPaths: [EXTENSION] },
   });
+  if (env.timing) Object.assign(runtime().timing, env.timing);
   const model = services.modelRuntime.getModel("antigravity", opts.model ?? "gemini-3.8-flash");
   if (!model) throw new Error("antigravity model not registered");
   const sessionManager = sdk.SessionManager.inMemory(env.cwd, undefined, opts.entries);

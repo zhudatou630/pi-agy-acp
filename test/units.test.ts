@@ -1,4 +1,4 @@
-// Pure helpers: level mapping, diff, anchors, replay, redaction, real agy tool shapes.
+// Pure helpers: level mapping, diff, anchors, replay, redaction, real agy tool shapes, turn phases.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -9,6 +9,7 @@ import { mapThinkingLevel, toPiModels, SEED_CATALOG } from "../src/catalog.ts";
 import { redact } from "../src/debug.ts";
 import { mergeToolUpdate, mirrorCall, mirrorResult, unifiedDiff } from "../src/mirror.ts";
 import { historyTranscript, inputsToBlocks, REPLAY_MAX_CHARS } from "../src/replay.ts";
+import { TIMING, Turn } from "../src/turn.ts";
 
 test("thinking level mapping clamps to what the model offers", () => {
   const flash = ["low", "medium", "high"];
@@ -222,6 +223,46 @@ test("replay edge cases: cut mid tool loop, background and exit codes, note budg
   assert.ok(mb.text.length - userChars <= REPLAY_MAX_CHARS, String(mb.text.length - userChars));
   assert.match(gaps[0].text, /omitted here\]\n\nq0\n\n[^\n]+\ns1\n\n\[output from other models omitted here\]\n\nq1/);
   assert.match(plan, /\[plan\]\n- \[x\] step one\n- \[ \] \*\*in progress\*\* step two/);
+});
+
+test("turn phases: agy's own work ends on silence, sized by what it did last", () => {
+  const t = new Turn();
+  assert.equal(t.wakeDelay(false, TIMING), undefined, "a prompt in flight ends the turn itself");
+  t.note("speaks");
+  assert.equal(t.phase, "prompt", "nothing agy does during a prompt starts the silence rules");
+  t.phase = "grace"; // the prompt returned while a background command runs
+  assert.equal(t.wakeDelay(true, TIMING), undefined, "the command is still running");
+  t.note("usage");
+  assert.equal(t.phase, "grace", "a model call closed before the command ended is not the report");
+  assert.equal(t.wakeDelay(false, TIMING), TIMING.wakeGrace);
+  t.note("speaks");
+  assert.equal(t.wakeDelay(false, TIMING), TIMING.wakeQuiet, "generating: agy may be silent for minutes");
+  t.note("usage");
+  assert.equal(t.wakeDelay(false, TIMING), TIMING.wakeSettle, "model call closed: tool calls would follow at once");
+  t.note("question");
+  t.pendingPermissions = 1;
+  assert.equal(t.wakeDelay(false, TIMING), undefined, "waiting on the user");
+  t.pendingPermissions = 0;
+  assert.equal(t.wakeDelay(false, TIMING), TIMING.wakeQuiet, "after the answer agy generates again");
+  t.note("usage");
+  t.note("command-done");
+  assert.equal(t.wakeDelay(false, TIMING), TIMING.wakeGrace, "a command that just ended: wait for agy to report on it");
+  t.ended = true;
+  assert.equal(t.wakeDelay(false, TIMING), undefined);
+});
+
+test("watchdog: a held reply is released after long silence, a silent prompt is stuck; tools and questions wait", () => {
+  const t = new Turn();
+  const at = (minutes: number) => t.lastActivity + minutes * 60_000;
+  assert.equal(t.watchdog(false, at(9), TIMING), "ok");
+  assert.equal(t.watchdog(false, at(11), TIMING), "stuck");
+  assert.equal(t.watchdog(true, at(11), TIMING), "ok", "a running tool is not silence");
+  t.pendingPermissions = 1;
+  assert.equal(t.watchdog(false, at(11), TIMING), "ok", "an open question is not silence");
+  t.pendingPermissions = 0;
+  t.phase = "grace";
+  assert.equal(t.watchdog(true, at(29), TIMING), "ok", "the background command may take this long");
+  assert.equal(t.watchdog(true, at(31), TIMING), "release", "its final status was probably dropped");
 });
 
 test("debug redaction replaces image bytes", () => {

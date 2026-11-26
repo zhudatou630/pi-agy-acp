@@ -4,7 +4,8 @@ import type { AssistantMessage, AssistantMessageEventStream, Model, SimpleStream
 import { type Binding, type BindingFile, inputHash, matchBinding, newInputs, newResponseId, splitFresh } from "./bindings.ts";
 import { mirrorCall, planMarkdown } from "./mirror.ts";
 import { historyTranscript, inputsToBlocks, REPLAY_MAX_CHARS, type AcpBlock } from "./replay.ts";
-import { type AcpSession, addUsage, CANCEL_WAIT_MS, type Runtime, type SessionOwner, TIMEOUT, type Turn } from "./runtime.ts";
+import { type AcpSession, addUsage, type Runtime, type SessionOwner } from "./runtime.ts";
+import { TIMEOUT, type Turn } from "./turn.ts";
 
 const BATCH_MS = 150;
 // agy maps only quota exhaustion to refusal; keep the raw reason as a fallback. Avoids pi's retry keywords.
@@ -350,7 +351,7 @@ function emitMirror(s: AcpSession, writer: Writer, id: string): boolean {
 /** Cancel and wait for agy to end the turn; one that never ends leaves the session broken. */
 async function cancelAndDrain(rt: Runtime, s: AcpSession, turn: Turn): Promise<void> {
   rt.cancel(s);
-  const deadline = Date.now() + CANCEL_WAIT_MS;
+  const deadline = Date.now() + rt.timing.cancelWait;
   while (!turn.closed) {
     const left = deadline - Date.now();
     const item = left > 0 ? await turn.queue.next(left) : TIMEOUT;

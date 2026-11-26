@@ -7,6 +7,8 @@ import fs from "node:fs";
 import readline from "node:readline";
 
 const LOG = process.env.FAKE_LOG;
+/** The client's settle window: scripts that "generate silently" stay quiet for longer than this. */
+const SETTLE = Number(process.env.FAKE_SETTLE_MS ?? 2000);
 const STATE = process.env.FAKE_STATE;
 const AUTH_FLAG = STATE ? `${STATE}.authed` : undefined;
 const AUTHED = process.env.FAKE_AUTH !== "0" || (!!AUTH_FLAG && fs.existsSync(AUTH_FLAG));
@@ -174,7 +176,7 @@ function serve() {
         u({ sessionUpdate: "usage_update", used: 1400, size: 1048576 });
         u({ sessionUpdate: "tool_call", toolCallId: "bgs-w", kind: "edit", title: "File notes.md", status: "in_progress", rawInput: { Path: "notes.md", Content: "x" } });
         u({ sessionUpdate: "tool_call_update", toolCallId: "bgs-w", status: "completed" });
-        await sleep(4000); // generating the next step silently
+        await sleep(SETTLE * 2); // generating the next step silently, longer than the settle window
         u({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "step two" } });
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "all steps done" } });
         u({ sessionUpdate: "usage_update", used: 1500, size: 1048576 });
@@ -196,7 +198,7 @@ function serve() {
         u({ sessionUpdate: "usage_update", used: 1450, size: 1048576 });
         await sleep(300);
         u({ sessionUpdate: "tool_call_update", ...rerun, status: "completed", rawOutput: { output: "ok", exit_code: 0 } });
-        await sleep(3000); // generating the report silently, longer than the settle window
+        await sleep(SETTLE * 1.5); // generating the report silently, longer than the settle window
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "rerun reported" } });
         u({ sessionUpdate: "usage_update", used: 1500, size: 1048576 });
         return;
@@ -244,7 +246,7 @@ function serve() {
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "need input " } });
         u({ sessionUpdate: "usage_update", used: 1350, size: 1048576 });
         const res = await ask("session/request_permission", { sessionId, toolCall: { toolCallId: "interaction_9", title: "Pick a color" }, options: [{ optionId: "r", name: "Red", kind: "allow_once" }, { optionId: "b", name: "Blue", kind: "allow_once" }] });
-        await sleep(2500); // generating after the answer, longer than the settle window
+        await sleep(SETTLE * 1.25); // generating after the answer, longer than the settle window
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `picked:${res?.outcome?.optionId ?? res?.outcome?.outcome}` } });
         u({ sessionUpdate: "usage_update", used: 1400, size: 1048576 });
         return;
