@@ -2,7 +2,7 @@
 
 本文记录设计决定和实现状态（2026-11-22）。调研过程见 [research/](research/README.md)，评审记录见 [review-2026-11-22.md](review-2026-11-22.md)。
 
-目标：做一个 pi package，把官方 `agy acp`（实测版本 1.5.14）接成 pi 的 provider，重点是在 pi-web 里用起来舒服。
+目标：做一个 pi package，把官方 `agy acp`（协议形状实测于 1.5.14，冒烟测试通过于 1.5.17）接成 pi 的 provider，重点是在 pi-web 里用起来舒服。
 依据：[调研汇总](research/README.md)、[agy 实测](research/agy-acp-handshake.md)。
 
 ## 0. 关键决定
@@ -12,7 +12,7 @@
 | D1 | agy 执行的工具在 pi-web 里怎么显示 | **只读镜像工具**：provider 发出 `agy_bash` / `agy_edit` / `agy_write` / `agy_read` / `agy_tool` 这几种 toolCall，对应的 pi 工具只等待 ACP 的结果，从不重做操作。这样 pi-web 能显示原生命令卡和并排 diff | pi 的历史里会留下合成的 toolCall 和 toolResult；一个 ACP turn 会被拆成多条 pi assistant 消息。备选是写进正文或 thinking，实现简单，但显示效果差 |
 | D2 | 进程模型 | **每个 pi 进程（pi-web server 或 TUI）共用一个 `agy acp`**，多个会话复用这个进程；空闲 30 分钟后退出（和 T3 Code 对 agy 的取值一致；常驻约 230 MB，重启后的第一个请求多等约 2.5 s 预热）。模型是按 ACP 会话设置的，所以共用一个进程也能同时跑多个模型。实测：同一个进程里，会话 A 用 flash、会话 B 用 claude-sonnet，同时各跑一个 `sleep 6` 工具，两个都在约 10.5 s 内完成，执行时间是重叠的 | 进程崩溃会影响所有会话（之后会自动 resume）。备选：`extraArgs: ["--process-per-session"]`，由 agy 自己按会话拆分 worker 进程 |
 | D3 | 权限 | **完全放行**（v0.3 改）：自动回复 `allow_once`，没有审批模式，也没有开关；agy 主动提问时照常弹窗让用户回答 | 和 pi、T3 的 Full access 一致 |
-| D4 | 发给 agy 的内容 | **只发用户输入和图片**。不发 pi 的 system prompt，也不用 `systemPrompt.append` | agy 的约束由用户写在 agy 自己的规则文件里：项目级的 `AGENTS.md`/`GEMINI.md`/`.agents/rules/`，全局的在 `~/.gemini/` 下 |
+| D4 | 发给 agy 的内容 | **只发用户输入和图片**，外加第 4 节列出的几类带标记的说明。不发 pi 的 system prompt，也不用 `systemPrompt.append` | agy 的约束由用户写在 agy 自己的规则文件里：项目级的 `AGENTS.md`/`GEMINI.md`/`.agents/rules/`，全局的在 `~/.gemini/` 下 |
 | D5 | fork、分支不一致或会话丢失时怎么接上 | 新建 ACP 会话，把**有界的历史转录**（6 万字符，带明确标记）放在第一条 prompt 前面。对话优先，工具只留“做了什么、结果如何”的一行摘要 | agy 原生的上下文（之前读过的文件等）不会带过去；读文件、搜索和工具输出的细节靠 agy 自己重读。备选：不 replay，从空白开始 |
 | D6 | 命名 | provider id 定为 **`antigravity`**，模型 id 用 agy 的基础模型 value（如 `antigravity/gemini-4-neon`），思考档位走 pi 的 thinking level。管理命令用较短的 `/agy` | 使用 `enabledModels` 时需要把这些模型加进去 |
 | D7 | steering | 用户在运行中发消息时，**立即**作为新的 `session/prompt` 发给 agy（原生 steer），pi 这边在下一个边界插入这条用户消息 | 实现比“等 turn 结束”复杂一档；如果出问题可以退回到只在工具边界投递 |
@@ -25,8 +25,10 @@ pi-web Node 进程（多个 AgentSession）
  │    ├─ provider "antigravity"  streamSimple：pi 上下文 → ACP prompt → pi 事件流
  │    ├─ 镜像工具 agy_*     execute：等待 ACP 工具终态 → 结果 + diff
  │    ├─ 命令 /agy（管理用）
- │    └─ 事件：before_provider_headers（关联 ctx）、input（steer）、session_shutdown
+ │    └─ 事件：session_start 等（取 ctx）、input（steer）、context（剔除唤醒消息）、
+ │           session_before_compact（压缩）、session_shutdown
  └─ globalThis[Symbol.for("pi-agy-acp")]  共享 Runtime（跨扩展实例只有一份）
+      ├─ instances    活着的扩展实例，请求按 pi session id 找到自己的那个（见 3.1）
       ├─ AgyProcess   懒启动 `agy acp`，独立进程组，崩溃后标记重启
       ├─ AcpConnection  NDJSON JSON-RPC，双向请求，pending 在退出时全部 reject
       ├─ SessionHub   acpSessionId → 事件队列、当前 turn、工具状态表、配置缓存
@@ -40,7 +42,8 @@ pi-web Node 进程（多个 AgentSession）
 ```
 src/index.ts        入口：注册 provider、工具、命令、事件
 src/acp.ts          JSON-RPC over stdio + 进程生命周期
-src/runtime.ts      共享 Runtime、SessionHub、turn 引擎
+src/runtime.ts      共享 Runtime：进程、ACP 会话表、收发和权限应答、模型目录
+src/turn.ts         一个 turn 的事件队列、阶段，以及“agy 自己的工作何时算结束”的判定
 src/provider.ts     streamSimple
 src/mirror.ts       ACP tool_call → pi toolCall 参数、结果和 diff
 src/bindings.ts     映射持久化 + 锚点匹配
@@ -60,7 +63,7 @@ sequenceDiagram
   participant R as Runtime / SessionHub
   participant A as agy acp
   W->>P: streamSimple(context, options)
-  P->>R: 取 ctx(header) → binding → 计算新输入
+  P->>R: 按 pi session id 找实例 → binding → 计算新输入
   R->>A: (懒启动/resume/set_config_option) session/prompt
   A-->>R: thought / text chunk
   R-->>P: 事件队列
@@ -69,7 +72,7 @@ sequenceDiagram
   P-->>W: toolcall agy_bash{command}，done(toolUse)
   W->>R: 镜像工具 execute(toolCallId) 等待终态
   A->>R: request_permission
-  R->>W: ctx.ui.confirm（10 分钟超时，超时即拒绝）
+  R-->>A: allow_once（自动放行，见 3.8）
   A-->>R: tool_call_update completed
   R-->>W: 镜像返回 {content: 输出, details.patch}
   W->>P: streamSimple(…, toolResult)（续接：不向 agy 发送任何内容）
@@ -81,22 +84,30 @@ sequenceDiagram
 
 ### 3.1 会话映射、恢复和 fork
 
-**取得会话身份。** 先用 `before_provider_headers` 拿到当前会话的 ctx：只在 `ctx.model.provider === "antigravity"` 时，往 headers 里写一个内部令牌，并在共享表里登记“令牌 → ctx”。streamSimple 从 `options.headers` 取出令牌，就能找到真实的 pi session id、cwd、`ctx.ui` 和 header 里的 parentSession。这个令牌不会发给 agy（agy 不走 HTTP）。
+**取得会话身份。** 每个 pi 会话有自己的扩展实例，实例从 `session_start`、`turn_start` 等事件拿到 ctx，也就知道真实的 pi session id、cwd 和 `ctx.ui`。活着的实例登记在共享 Runtime 的 `instances` 里。
 
-这样做能绕开 pi-web side chat 把 `options.sessionId` 设成主会话 id 的问题。拿不到 ctx 的请求（压缩、摘要等维护类调用）走一次性的临时 ACP 会话，用完就 `session/close`。`disableContinuation` 的缓存预热请求直接返回空结果，不发给 agy；我们本来也不声明 promptCache。
+provider 不能假定“注册它的那个实例”就是发请求的会话：provider 属于 ModelRuntime，而 pi-web 的子代理和父会话共用一个 ModelRuntime，后加载的实例会顶掉先注册的。所以每个请求按 `options.sessionId` 找实例：
+
+1. 注册 provider 的实例匹配（id 相同，或者它是 pi-web 的 side chat、`header.piWebSide.parentSessionId` 等于这个 id）就用它。side chat 被 pi-web 有意设成父会话的 id 当缓存键，但它有自己的实例和 binding，不会和父会话混用 ACP 会话。
+2. 否则在 `instances` 里找 id 完全相同的实例。
+3. 都找不到就是维护类请求。
+
+实例空闲（`ctx.isIdle()`）时到来的请求也算维护类：pi-web 的自动命名会拿会话的 stream 函数和 session id 另起一个临时 Agent，它不属于会话的 agent run。
+
+维护类请求（压缩摘要、自动命名等）走一次性的临时 ACP 会话：只要文字，权限一律拒绝，用完就 `session/close`；stopReason 的映射和正常对话相同，所以被配额拒绝或被 token 上限截断的摘要不会被保存。`disableContinuation` 的缓存预热请求直接返回空结果，不发给 agy；我们本来也不声明 promptCache。
 
 **持久化。** 每个 pi 会话一个旁路文件：`~/.pi/agent/pi-agy-acp/bindings/<piSessionId>.json`。
 
 ```jsonc
 { "v": 1, "piSessionId": "…", "bindings": [ {
   "acpSessionId": "…", "cwd": "…", "createdAt": 0, "lastActive": 0,
-  "responseIds": ["agy:<acp8>:<n>", …],   // 本 ACP 会话产出的 pi assistant 消息（保留最近 200 条）
-  "delivered": ["<sha256 前 16 位>", …],   // 已经直接发给 agy 的用户输入（steer 去重用）
-  "config": {"model":"gemini-4-neon","thought_level":"high","mode":"default"}
+  // 本 ACP 会话产出的 pi assistant 消息（保留最近 200 条）；error / aborted 的标 discardable
+  "produced": [ {"id": "agy:<acp8>:<随机>", "discardable": false}, … ],
+  "failedKey": "<sha256 前 16 位>"         // 已到达 agy 但失败的 prompt：pi 自动重试时不重发
 } ] }
 ```
 
-每个 pi 会话最多保留 5 个 binding，对应 `/tree` 的不同分支。文件写入用 tmp 文件加 rename；超过 60 天的文件在启动时清理。不用 `pi.appendEntry`，理由是：fork 会把 entry 复制到新会话，而 provider 拿不到可写的 session。
+steer 去重用的“已直接发给 agy 的输入”只放在内存里的 turn 上，不落盘。每个 pi 会话最多保留 5 个 binding，对应 `/tree` 的不同分支。文件写入用 tmp 文件加 rename；超过 60 天的文件在启动时清理。不用 `pi.appendEntry`，理由是：fork 会把 entry 复制到新会话，而 provider 拿不到可写的 session。
 
 **锚点匹配（替代整段前缀 hash）。** provider 产出的每条 assistant 消息都设置 `responseId = "agy:<acp8>:<seq>"`。每次请求时：
 
@@ -110,7 +121,7 @@ sequenceDiagram
 
 这套规则覆盖的情况：
 
-- pi 压缩：压缩会保留最近的消息，锚点还在，ACP 会话不受影响，agy 自己的完整上下文也保留着。
+- pi 压缩：压缩会保留最近的消息，锚点还在，ACP 会话继续用。pi 的压缩只缩短 pi 的历史，agy 的上下文由 agy 自己的 `/compact` 压缩，见 3.13。
 - `/tree` 在分支之间来回切：切回去时，原分支对应的 binding 还在。
 - 用别的模型插话：见上面第 3 步。
 - 编辑旧消息后重发：锚点变成更早的一条，判定为分支不一致，新建 ACP 会话并做 replay。
@@ -197,7 +208,7 @@ sequenceDiagram
 
 ### 3.3 模型和思考档位
 
-- **来源**：`configOptions`，`model` 取它的 select 选项；`thought_level` 按模型逐个探测（实测见 handshake §2）。
+- **来源**：`configOptions`，`model` 取它的 select 选项；`thought_level` 按模型逐个探测（实测见 handshake §2）。配置项先按 id 找，找不到再按 category 找，设置时用 agy 公布的 id；分组的选项会展开。
 - **探测**：第一次真正启动进程之后（或 agy 版本变化、超过 24 小时、执行 `/agy models refresh` 时），在后台开一个临时会话，依次对每个模型调用 `set_config_option`，读出它的 thought_level 选项，然后 close 这个会话。这一步只走配置 RPC，不消耗额度。
 - **缓存**：结果写进 `catalog.json`，内容是 `{agyVersion, fetchedAt, tier, models:[{id,name,levels[],contextWindow}], commands:[…]}`。
 - **离线启动**：factory 同步读取 catalog 并注册 provider，**factory 不会拉起 agy**。没有缓存时，用今天实测的 9 个模型作为内置种子。目录更新后重新 `registerProvider`；pi-web 的模型列表最多 60 秒后刷新。
@@ -247,8 +258,11 @@ sequenceDiagram
 | `models refresh` | 重新探测模型目录 |
 | `login` | 见 3.10 |
 | `new` | 放弃当前 ACP 会话，下次发送时新建 |
+| `compact` | 只让 agy 压缩它自己的上下文（见 3.13） |
 | `debug on\|off` | 开关抓包 |
 | `restart` | 杀掉并重启 agy 进程 |
+
+不带参数的 `/agy` 会弹出子命令列表（pi-web 没有参数补全）。
 
 ### 3.8 权限
 
@@ -258,6 +272,7 @@ sequenceDiagram
 - 维护类请求（比如压缩时开的临时会话）回 `reject_once`，确保这类请求不会执行任何工具。
 - 没有使用 `--dangerously-skip-permissions`：效果相同，但这样能在抓包里看到每一次放行。
 - agy 主动**提问**（`interaction_*`，让用户在几个选项里挑一个）不算审批，仍然弹出 `select` 让用户回答，10 分钟内不选就算取消。
+- **只读会话只靠一句话约束。** pi-web 的只读预设、explore / plan 子代理靠 pi 的工具清单生效，而工具清单不发给 agy。当前 pi 会话里没有激活任何写类内置工具（`bash`、`powershell`、`edit`、`write`，和 pi-web 的判断相同）时，每个新 prompt 前加一行 `[pi: read-only session. …]`。这只是建议：agy 在 default 模式下写工作区文件不请求权限，没有第二道闸。pi-web 的 side chat 自带一段边界说明，会作为用户文本到达 agy，不需要额外处理。
 
 ### 3.9 进程管理
 
@@ -269,6 +284,7 @@ sequenceDiagram
 - **复用**：整个 pi 进程共用一个 agy 进程（挂在 `globalThis` 上），多个会话靠 sessionId 复用它。`initialize` 只做一次，结果缓存下来。model、thought_level 和 mode 都是**按 ACP 会话**设置的，所以不同的 pi 会话可以同时用不同的模型并行工作（已实测，见 D2）。
 - **崩溃**：进程 `exit` 时，所有 pending RPC 都 reject；正在进行的 turn 结束为 `error`，提示“agy 进程退出（code/signal），下次发送会自动重启并接回会话”；所有 binding 标记为需要 resume。**不自动重发**那条 prompt，因为它可能已经产生了副作用。下一次请求时再重新拉起进程。
 - **卡死保护**：一个 turn 在 10 分钟内没有任何事件，且没有正在进行的工具或待处理的权限请求时，判定为卡死：发 cancel，并以 error 结束。静默时长用单调时钟（`performance.now()`）计算：在 Linux 上主机休眠和手动调整系统时间都不算静默（agy 也在睡），pi 自己的事件循环被阻塞则照常计入；后台命令 30 分钟的上限同样如此。
+- **版本变化**：agy 会自己更新。握手报告的版本和上次运行记下的不同时，在下一次对话里提示一次，提醒协议行为可能有变。
 - **空闲退出**：没有活动 turn（已判定 broken 的会话不算，agy 可能永远不回它的 prompt）、超过 30 分钟既没有请求也没有 agy 的 `session/update` 时（agy 主动工作期间不会被回收），先 `session/close` 关闭所有会话，再结束进程。
 - **退出清理**：
   - 正常路径：`session_shutdown`（最后一个实例退出时）→ 关闭会话 → 关闭 stdin → 对进程组发 `SIGTERM`（`kill(-pgid)`）→ 2 秒后还在就 `SIGKILL`。
@@ -313,13 +329,25 @@ sequenceDiagram
 - 被 steer 接管的 prompt 返回的计费用量累加进本轮，和最后一个 prompt 的一起计费。以错误（含配额用尽）结束的一轮同样记下已报告的用量（取消的不记）：pi 估算上下文时跳过 error 消息，溢出检测看的是错误文案，不受影响。
 - 没有 `usage_update` 的 turn（如 agy 自己的 `/compact`）不记用量：只有计费值时，pi 会把各项之和当成上下文占用。以下情况只会少算、不会多算，属于已接受的限制：agy 已结束但 pi 带着新输入另开 turn、或在后台等待期间 steer/停止时，前一个 prompt 的 usage 会被丢弃；回合中途在 pi 切换模型时，续接消息按新模型记名和计价；分档价格按整轮累计量选档（拿不到逐次调用的数）。
 
+### 3.13 压缩
+
+pi 的压缩只缩短 pi 自己的历史。锚点还在时 ACP 会话继续用，agy 那边的上下文一点没少，上下文占用（取自 agy 的 `usage_update`）也不会降。所以压缩分两路：
+
+- **pi 的 `/compact` 和 pi-web 的压缩按钮**：`session_before_compact` 钩子先在当前分支的 ACP 会话里发 agy 自己的 `/compact` 并等它结束，然后 pi 照常做摘要（走临时会话）。两边都压缩，代价是两次请求。pi 的摘要留着有用：同一个会话之后切到别的模型，读的是 pi 的历史。agy 这一步失败时提示一下，pi 的压缩继续。
+- **`/agy compact`**：只发 agy 的 `/compact`，pi 的历史不动，一次请求。agy 正在工作时拒绝执行（这时再发 prompt 会变成 steer）。
+
+两路共用一段代码：用和 streamSimple 相同的锚点匹配找到当前分支的 ACP 会话，冷启动时先 resume 并重设模型，再发 `/compact`。当前模型不是 agy 时不做。
+
+`/compact` 之后上下文占用要到下一轮回复才更新。这次调用的计费不记进 pi（没有消息承载它）。不取消 pi 的压缩，是因为扩展返回取消时 pi 会把它当成一次失败报给用户。
+
 ## 4. 发给 agy 的内容（干净性约定）
 
 1. **会出现在 `session/prompt` 里的内容**：
    - 用户这一轮的文字和图片；
    - 中途其他模型回答的简短说明（3.1 第 3 步）；
    - 必要时的 replay 转录（3.1，有明确标签）；
-   - slash 命令的原文。
+   - 只读会话的一行说明（3.8）；
+   - slash 命令的原文；压缩时由插件代发的 `/compact`（3.13）。
 
    除此以外没有别的。
 2. **`session/new` 的参数**：`{cwd, mcpServers: []}`，不带 `_meta`。
@@ -335,7 +363,7 @@ sequenceDiagram
 { "agyPath": null, "extraArgs": [] }
 ```
 
-replay 上限（6 万字符）、空闲退出（30 分钟）、卡死保护（10 分钟）、取消等待（10 秒）都是代码里的常量，没人需要调就不做成配置。
+replay 上限（6 万字符）、空闲退出（30 分钟）、卡死保护（10 分钟）、取消等待（10 秒）都是代码里的常量，没人需要调就不做成配置。turn 引擎的几个等待时长放在 Runtime 的 `timing` 上，只是为了让测试把它们调短。
 
 `extraArgs` 留给 `--disable-telemetry`、`--sandbox`、`--process-per-session` 这类参数，默认为空。
 
@@ -359,17 +387,22 @@ replay 上限（6 万字符）、空闲退出（30 分钟）、卡死保护（10
 | 单元 | JSON-RPC 分帧和双向请求；ACP 事件 → pi 事件，包括 index 配对和唯一的终止事件；diff 生成；锚点匹配和 delivered 去重；replay 截断；权限选项映射 |
 | 集成（provider + 假 agent） | 文本和思考流；tool → toolUse → 镜像 resolve → 续接；150 ms 内的并行合并；权限的允许、拒绝、超时、无 UI；取消；steer 不重发；进程重启后 resume 并重新设置配置；list 里没有该会话时 replay；未登录提示；崩溃不自动重发；进程组清理后不留孙子进程 |
 | pi SDK 端到端 | 用 `createAgentSessionServices` 在进程内跑真实的 agent loop：验证镜像工具对模型隐藏但可以执行、toolResult 续接、fork 后新建 ACP 会话、压缩后保留 ACP 会话、responseId 能保存到下一轮 |
-| 真机冒烟（手动，`npm run smoke`） | 真实的 agy，flash + low：一次带工具的对话；重启后 resume；图片；取消；steer |
+| 宿主行为（`test/host.test.ts`） | pi-web 的做法照搬到 SDK 上：子代理共用父会话的 ModelRuntime、自动命名的临时 Agent、只读工具集、压缩钩子、`/agy compact` |
+| 实录回放（`test/fixtures/`） | 真实 agy 抓包里的一段（后台命令结束后 agy 自己读、写、跑命令）由假 agent 按原顺序重放，停顿按比例缩短 |
+| 真机冒烟（手动，`npm run smoke`） | 真实的 agy，flash + low：一次带工具的对话；重启后 resume；图片；`/agy compact` 后上下文下降；取消；steer |
 | pi-web 目测 | 在隔离的 pi-web 实例里截图核对：命令卡、diff、思考折叠 |
 
 ## 7. pi-web 改动建议（只列出来，不会去改）
 
+pi-web 已经把 `<来源>_bash/read/edit/write` 这类镜像工具显示成对应的内置工具并带来源标签，`<来源>_tool` 用参数里的 `title` 和 `kind`。下面是还没对上的地方：
+
 | 优先级 | 建议 | 不改的影响 |
 |---|---|---|
-| P1 | side chat 把 `agent.sessionId` 改成父会话 id（`lib/rpc-manager.ts:3120-3124`），对有状态的 provider 来说身份会出错。建议在 `options.metadata` 里另外带上真实的 session id，或者对声明 `stateful` 的 provider 不做覆盖 | 已经用 header 关联 ctx 规避了；如果在 side chat 里用 agy，会走临时会话或者看不到主会话的上下文 |
-| P2 | 工具卡支持 `details.title`（或 label）覆盖显示名，这样能显示 agy 的标题，比如 "File hello.txt"，而不是 `agy_edit` | 卡片头部显示 `agy_edit` 加路径预览，可以接受 |
-| P2 | 渲染 `setStatus`，在 composer 旁边显示一行 agy 状态：mode、后台任务数、tier | 状态只能通过 `/agy status` 和 notify 查看 |
-| P3 | 在 `activeToolResults` 白名单里加入 `agy_bash`，支持命令输出的增量显示 | agy 本身不流式输出命令结果，目前没有实际影响 |
+| P2 | side chat 的工具守卫按原名放行 `read/grep/find/ls`，`agy_read` 等镜像卡会显示成“被拒绝”，而 agy 实际已经执行。建议按 `toolPresentation().as` 判断，或对镜像工具放行 | side chat 里用 agy 时卡片状态不对；agy 的行为不受影响 |
+| P2 | 全局 Usage 页用 token 数重新计价。插件记的 token 分项是按上下文占用缩放过的（3.12），重算出来的金额和会话面板不一致。建议优先用消息里记录的费用 | 两处金额不同 |
+| P2 | 渲染 `setStatus`，在 composer 旁边显示一行 agy 状态：后台任务数、tier | 状态只能通过 `/agy status` 和 notify 查看 |
+| P3 | 回合活动统计（`lib/turn-activity.ts`）调用 `toolPresentation` 时带上参数，agy 的搜索和抓取才能归到“浏览 / 调研” | 它们被算成“其他工具” |
+| P3 | `agy-wake` 这类“触发一轮回复的自定义消息”当作分组边界（现在只认 subagent-notification） | agy 主动汇报的回复并进上一个回合的分组 |
 | P3 | 模型目录变化时通过 SSE 推送给 picker | 最多要等 60 秒 |
 
 ## 8. 合规自检清单
@@ -401,12 +434,13 @@ replay 上限（6 万字符）、空闲退出（30 分钟）、卡死保护（10
 
 ## 10. 主要风险
 
+0. **依赖宿主怎么调用 provider**：请求归属靠 `options.sessionId` 和 `ctx.isIdle()` 判断（3.1）。pi-web 改变子代理共用 ModelRuntime 的方式、side chat 的 id 约定，或者新增“借会话的 stream 函数发请求”的功能时，都要对照 `test/host.test.ts` 重新确认。
 1. **镜像方案依赖 pi 的内部行为**：hiddenDeclarations 下的工具仍然能执行，这一点有源码依据，但还要靠 E2E 测试锁住；responseId 能否保存到下一轮也一样。pi 升级后可能失效，所以 E2E 测试要跟着 pi 版本一起跑。
-2. **agy 1.5.x 的行为变化**：比如 steer 的语义、load 一个不存在的 id 也会成功。启动时记下 `agentInfo.version`，版本变化时提示重新跑冒烟测试。
-3. **压缩和维护类请求**走临时会话，结果质量取决于 agy；建议对 agy 模型关掉 pi 的自动压缩。agy 自己有 1M 的上下文窗口，也能自动压缩。
+2. **agy 1.5.x 的行为变化**：比如 steer 的语义、load 一个不存在的 id 也会成功。agy 会自己更新，版本变化时提示一次（3.9），需要时重新跑冒烟测试。
+3. **压缩和维护类请求**走临时会话，结果质量取决于 agy。agy 自己有 1M 的上下文窗口，也能自动压缩，pi 的自动压缩很少会被触发；触发时和手动压缩走同一条路（3.13）。
 4. **共享进程**：一个会话把进程搞崩，所有会话的当前 turn 都会失败（之后能自动 resume）。如果实际遇到，再开 `processPerSession`。
 
-## 11. 实现状态与验证（2026-11-22）
+## 11. 实现状态与验证
 
 | 项 | 状态 | 验证方式 |
 |---|---|---|
@@ -420,9 +454,12 @@ replay 上限（6 万字符）、空闲退出（30 分钟）、卡死保护（10
 | 图片 | 已实现 | 真实 agy smoke（能认出红色） |
 | slash 命令 | v0.3 改为不注册，直接透传 | e2e：`/goal …` 原样到达 agy |
 | ACP_DEBUG 抓包和 `npm run acp:tail` | 已实现 | smoke 抓包核对：只发送了用户输入 |
+| 请求按 pi session id 找实例；会话空闲时的请求算维护类 | 已实现 | host.test.ts：子代理共用 ModelRuntime 后父子各自续接；自动命名不进聊天的 ACP 会话 |
+| 只读会话的一行说明 | 已实现 | host.test.ts |
+| 压缩：钩子先发 agy 的 `/compact`；`/agy compact` | 已实现 | host.test.ts；真实 agy 1.5.17：压缩后下一轮上下文占用下降，之前的内容还记得 |
+| 截断或被拒的摘要不保存 | 已实现 | tree.test.ts |
 
 与设计的偏差：
 
-- 会话身份直接取自扩展实例的 ctx（每个会话有自己的扩展实例），**没有用** `before_provider_headers` 令牌。side chat 和 fork 都有各自的实例和会话 id。维护类请求的判定条件是：`options.sessionId` 既不是本会话 id，也不在 header 里出现。
 - ACP turn 中间的 toolUse 消息 usage 记为 0，只有最后一条消息带上上下文占用（避免 pi 的统计把用量重复累加）。
 - 模型目录探测会在 `~` 下开一个临时会话，用完就 close；它仍然会出现在 agy 的会话列表里，每 24 小时最多一次。

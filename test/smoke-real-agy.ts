@@ -48,6 +48,18 @@ try {
   assert.equal(frames().filter((f) => f.dir === "out" && f.msg.method === "session/prompt").at(-1).msg.params.sessionId, sid);
   assert.match(lastText(session), /notes/i);
 
+  step("/agy compact (agy's own compaction; pi's history stays)");
+  const used = () => session.messages.filter((m: any) => m.role === "assistant" && m.usage.totalTokens > 0).at(-1).usage.totalTokens;
+  fs.writeFileSync(path.join(cwd, "big.txt"), Array.from({ length: 2000 }, (_, i) => `line ${i}: the quick brown fox jumps over the lazy dog`).join("\n"));
+  await session.prompt("Run exactly `cat big.txt` (the whole file, no head or tail) and reply with the number on its last line.");
+  const before = used();
+  await session.prompt("/agy compact");
+  assert.ok(frames().some((f) => f.dir === "out" && f.msg.method === "session/prompt" && f.msg.params.sessionId === sid && f.msg.params.prompt[0]?.text === "/compact"));
+  await session.prompt("Which file did you create first in this conversation? Just the name.");
+  console.log(`context: ${before} → ${used()} tokens; answer: ${lastText(session)}`);
+  assert.ok(used() < before, "agy's context shrank");
+  assert.match(lastText(session), /notes/i);
+
   step("steer mid-turn");
   const run = session.prompt("Count slowly from 1 to 40, one number per line, no tools.");
   await until(() => session.isStreaming, 10000);

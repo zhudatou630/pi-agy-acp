@@ -139,6 +139,8 @@ prompt 里放 `{"type":"image","mimeType":"image/png","data":"<base64>"}`，模�
 
 `session/prompt` 里直接发文本 `/compact` 就能生效：没有任何 update，只回 end_turn 和 usage。
 
+1.5.17 复测（`npm run smoke`）：`/compact` 期间会推一条 `usage_update`，数值是压缩这次调用自己的输入量，不是压缩后的占用；结果里带 usage（一次实测：input 2824、output 496、cachedRead 11496）。压缩后的下一个 prompt `cachedReadTokens` 为 0（上下文被改写，缓存前缀失效），`usage_update.used` 下降，一次实测从 14386 降到 11716，之前创建过的文件名仍然答得出。新会话第一轮的占用约 9000，是 agy 自己的系统提示和工具，压缩不会低于这个数。
+
 ## 11. 未登录
 
 用空 HOME 启动：initialize 正常，`session/new` 和 `session/list` 都返回 `{"code":-32000,"message":"Authentication required"}`。
