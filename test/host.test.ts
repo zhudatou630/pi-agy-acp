@@ -5,7 +5,7 @@ import path from "node:path";
 import { after, test } from "node:test";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { SEED_CATALOG } from "../src/catalog.ts";
-import { assistants, createSession, lastText, runtime, setupEnv } from "./helpers.ts";
+import { assistants, createSession, lastText, runtime, setupEnv, sleep, until } from "./helpers.ts";
 
 const env = setupEnv("host");
 // the catalog remembers the agy version of the last run; the fake reports another one
@@ -60,6 +60,37 @@ test("a subagent that loads the extension into its parent's model runtime does n
   assert.equal(env.frames().findLast((f) => f.method === "session/new").params.cwd, env.cwd, "it runs in the session's directory");
 });
 
+test("a subagent whose profile loads no extensions answers from throwaway sessions and leaves the parent alone", async () => {
+  const parent = await createSession(env);
+  await parent.session.prompt("parent one");
+  const parentAcp = promptSid();
+  // pi-web's built-in profiles: the parent's model runtime (and provider), but no instance of this extension
+  const child = await createSession(env, { modelRuntime: parent.services.modelRuntime, extension: false });
+  await child.session.prompt("child one");
+  assert.match(lastText(child.session), /child one$/);
+  assert.notEqual(promptSid(), parentAcp);
+  assert.equal(assistants(child.session).at(-1).responseId, undefined, "no ACP session of its own to continue");
+  await parent.session.prompt("parent two");
+  assert.equal(promptSid(), parentAcp);
+});
+
+test("a side chat sends its parent's session id and still gets its own ACP session", async () => {
+  const main = await createSession(env);
+  await main.session.prompt("main one");
+  const mainAcp = promptSid();
+  const side = await createSession(env);
+  side.session.agent.sessionId = main.session.sessionId; // pi-web: the parent's id is the side chat's cache key
+  await side.session.prompt("side one");
+  const sideAcp = promptSid();
+  assert.notEqual(sideAcp, mainAcp);
+  assert.match(assistants(side.session).at(-1).responseId, /^agy:/);
+  await side.session.prompt("side two");
+  assert.equal(promptSid(), sideAcp);
+  await main.session.prompt("main two");
+  assert.equal(promptSid(), mainAcp);
+  assert.deepEqual(env.prompts().at(-1).params.prompt, [{ type: "text", text: "main two" }]);
+});
+
 test("a request made with the session's id outside its agent run (pi-web auto-name) stays out of the ACP session", async () => {
   const { session } = await createSession(env);
   await session.prompt("first question");
@@ -77,6 +108,17 @@ test("a request made with the session's id outside its agent run (pi-web auto-na
   await session.prompt("second question");
   assert.equal(promptSid(), sid, "the chat continues its ACP session");
   assert.deepEqual(env.prompts().at(-1).params.prompt, [{ type: "text", text: "second question" }]);
+  // the same while the session is busy: being busy does not make the request part of its run
+  const run = session.prompt("SCRIPT:slow");
+  await until(() => env.prompts().at(-1).params.sessionId === sid && JSON.stringify(env.prompts().at(-1).params.prompt).includes("SCRIPT:slow"), 5000);
+  const busyNamer = new Agent({
+    initialState: { systemPrompt: src.state.systemPrompt, model: src.state.model, thinkingLevel: src.state.thinkingLevel, tools: [], messages: src.state.messages.filter((m: any) => m.role !== "user" || !JSON.stringify(m.content).includes("SCRIPT:slow")) },
+    convertToLlm: src.convertToLlm, transformContext: src.transformContext, streamFn: src.streamFunction, getApiKey: src.getApiKey, sessionId: src.sessionId,
+  } as any);
+  await busyNamer.prompt("Create a concise title for this session, again.");
+  assert.notEqual(promptSid(), sid, "the running reply is not steered by the title request");
+  await run;
+  assert.match(lastText(session), /chunk29 $/, "the reply ran to its end");
 });
 
 test("a session without write-capable tools tells agy so on every prompt", async () => {
@@ -129,6 +171,30 @@ test("/agy compact compacts only the agy session", async () => {
   await session.prompt("two");
   assert.equal(promptSid(), sid);
   assert.deepEqual(env.prompts().at(-1).params.prompt, [{ type: "text", text: "two" }]);
+});
+
+test("/agy compact leaves Stop in force and waits for an open reply", async () => {
+  const { session, mock } = await createSession(env);
+  await session.prompt("one");
+  const sid = promptSid();
+  const slow = session.prompt("SCRIPT:slow");
+  await until(() => JSON.stringify(env.prompts().at(-1).params.prompt).includes("SCRIPT:slow"), 5000);
+  await session.prompt("/agy compact");
+  assert.match(mock.calls.filter((c) => c.method === "notify").at(-1)!.args[0], /still working/);
+  assert.equal(compacts(sid).length, 0);
+  await slow;
+  assert.match(lastText(session), /chunk29 $/, "the open reply kept its output");
+  // Stop, then compact at once: what agy still does for the stopped work stays refused
+  const run = session.prompt("SCRIPT:stoplate");
+  await sleep(300);
+  await session.abort();
+  await run;
+  await session.prompt("/agy compact");
+  assert.equal(compacts(sid).length, 1);
+  await until(() => env.frames().some((f) => f.lateOutcome), 5000);
+  assert.equal(env.frames().find((f) => f.lateOutcome).lateOutcome, "deny");
+  await sleep(300);
+  assert.ok(!session.messages.some((m: any) => m.role === "custom" && m.customType === "agy-wake"));
 });
 
 test("/agy compact after a restart resumes the chat's ACP session first", async () => {

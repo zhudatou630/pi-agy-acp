@@ -133,40 +133,36 @@ export function createStreamSimple(inst: Instance) {
 }
 
 /**
- * The instance whose pi session made this request, and a working directory for it. No instance for
- * maintenance: another id (compaction, summaries), or the session's id outside its agent run
- * (pi-web's auto-name reuses the session's stream function and id).
+ * The instance whose agent run this request is part of: it carries that run's abort signal. A
+ * session id cannot tell: pi-web's subagents share their parent's model runtime (the last instance
+ * to register receives everyone's requests), side chats send their parent's id, and auto-name sends
+ * the session's own id from a temporary agent. No instance means maintenance (compaction, summaries,
+ * titles); `cwd` is then the directory of the session with that id, else of the registered instance.
  */
-function route(registered: Instance, sid: string | undefined): { inst?: Instance; cwd: string } {
+function route(registered: Instance, options: SimpleStreamOptions): { inst?: Instance; cwd: string } {
   const instances = registered.runtime.instances as Set<Instance>;
-  let cwd: string | undefined;
-  const serves = (i: Instance, side: boolean): boolean => {
+  const sid = (options as any).sessionId as string | undefined;
+  let sameId: string | undefined;
+  let fallback: string | undefined;
+  for (const i of new Set([registered, ...instances])) {
     try {
       const ctx = i.ctx();
-      const own = i.sessionId();
-      if (!ctx || !own) return false;
-      if (i === registered) cwd ??= ctx.cwd;
-      if (!sid || (sid !== own && !(side && sid === ctx.sessionManager?.getHeader?.()?.piWebSide?.parentSessionId))) return false;
-      cwd = ctx.cwd;
-      return !ctx.isIdle?.();
+      if (!ctx) continue;
+      if (options.signal && ctx.signal === options.signal) return { inst: i, cwd: ctx.cwd };
+      if (sid && i.sessionId() === sid) sameId = ctx.cwd;
+      else if (i === registered) fallback = ctx.cwd;
     } catch {
       instances.delete(i); // a disposed session's ctx throws
-      return false;
     }
-  };
-  // pi-web side chats route with their parent's id
-  const inst = serves(registered, true) ? registered
-    // A provider belongs to a model runtime, and pi-web's subagents share their parent's: whichever
-    // instance registered last receives the requests of all of them.
-    : [...instances].find((i) => serves(i, false));
-  return { inst, cwd: cwd ?? process.cwd() };
+  }
+  return { cwd: sameId ?? fallback ?? process.cwd() };
 }
 
 async function run(registered: Instance, model: Model<any>, messages: any[], options: SimpleStreamOptions, stream: AssistantMessageEventStream): Promise<void> {
   const rt = registered.runtime;
   // cache warming probe: never forward to a stateful agent
   if ((options as any).disableContinuation) return new Writer(stream, model).done("stop");
-  const { inst, cwd } = route(registered, (options as any).sessionId);
+  const { inst, cwd } = route(registered, options);
   if (!inst) return runEphemeral(rt, model, messages, options, stream, cwd);
   const ctx = inst.ctx();
   const own = inst.sessionId()!;
@@ -224,7 +220,7 @@ async function run(registered: Instance, model: Model<any>, messages: any[], opt
       const transcript = history.length ? historyTranscript(history, REPLAY_MAX_CHARS, messages) : "";
       const prompt: AcpBlock[] = [transcript, inst.readOnly() ? READ_ONLY_NOTE : ""].filter(Boolean).map((text) => ({ type: "text" as const, text }));
       prompt.push(...blocks);
-      const key = inputHash(JSON.stringify(prompt));
+      const key = inputHash(JSON.stringify([transcript, blocks])); // the user's input, not our note
       if (b!.failedKey === key) {
         // pi retries "transient" errors by resending; agy may already have acted on this prompt
         b!.failedKey = undefined;
@@ -361,8 +357,7 @@ function emitMirror(s: AcpSession, writer: Writer, id: string): boolean {
   return true;
 }
 
-/** Cancel and wait for agy to end the turn; one that never ends leaves the session broken. */
-async function cancelAndDrain(rt: Runtime, s: AcpSession, turn: Turn): Promise<void> {
+async function drainAborted(rt: Runtime, s: AcpSession, turn: Turn, writer: Writer, file: BindingFile, b: Binding): Promise<void> {
   rt.cancel(s);
   const deadline = Date.now() + rt.timing.cancelWait;
   while (!turn.closed) {
@@ -372,17 +367,13 @@ async function cancelAndDrain(rt: Runtime, s: AcpSession, turn: Turn): Promise<v
     if (item.kind === "end") turn.closed = true;
   }
   turn.closed = true;
-}
-
-async function drainAborted(rt: Runtime, s: AcpSession, turn: Turn, writer: Writer, file: BindingFile, b: Binding): Promise<void> {
-  await cancelAndDrain(rt, s, turn);
   failWith(rt, file, b, writer, "aborted", "Cancelled");
 }
 
 /**
- * Run agy's own /compact in the ACP session of this pi session's current branch. pi's compaction
- * only shortens pi's history: the ACP session keeps its whole context until agy compacts it.
- * Returns "none" when the branch has no ACP session, "busy" while agy is working in it.
+ * Run agy's own /compact in the ACP session the next request of this pi session would continue.
+ * pi's compaction only shortens pi's history: the ACP session keeps its whole context until agy
+ * compacts it. Returns "none" when there is no such session, "busy" while a reply is open in it.
  */
 export async function compactAgy(inst: Instance, want: { model?: string; piLevel?: string }, signal?: AbortSignal): Promise<"done" | "none" | "busy"> {
   const rt = inst.runtime;
@@ -390,29 +381,18 @@ export async function compactAgy(inst: Instance, want: { model?: string; piLevel
   const own = inst.sessionId();
   if (!ctx || !own) return "none";
   const file = rt.store.load(own);
-  const branch = ctx.sessionManager.getBranch().flatMap((e: any) => (e.type === "message" ? [e.message] : []));
-  const match = matchBinding(file, branch);
+  // the context as the next request carries it: anchors pi compacted away no longer count
+  const match = matchBinding(file, ctx.sessionManager.buildSessionProjection().messages);
   if (!match || match.anchor < 0) return "none";
   const session = await rt.resumeSession(match.binding.acpSessionId, match.binding.cwd);
   if (!session) return "none";
-  if (session.turn && !session.turn.ended) return "busy"; // a prompt now would steer that turn
+  // not closed: pi is still showing that reply, and a prompt now would steer it
+  if (session.activeTurn || session.command) return "busy";
   session.owner = inst;
   inst.attach(session, file, match.binding);
-  await rt.applyConfig(session, want); // agy resets the model on resume
-  if (signal?.aborted) throw new Error("Cancelled");
-  const turn = await rt.prompt(session, [{ type: "text", text: "/compact" }]);
-  for (;;) {
-    const item = await turn.queue.next(undefined, signal);
-    if (item === TIMEOUT) {
-      await cancelAndDrain(rt, session, turn);
-      throw new Error("Cancelled");
-    }
-    if (item.kind !== "end") continue;
-    turn.closed = true;
-    const end = turnOutcome(turn, item);
-    if ("fail" in end) throw new Error(end.message);
-    return "done";
-  }
+  const stop = (await rt.command(session, "/compact", want, signal))?.stopReason;
+  if (stop === "end_turn") return "done";
+  throw new Error(stop === "refusal" ? QUOTA_MESSAGE : stop === "cancelled" ? "Cancelled" : `agy ended /compact with ${stop}`);
 }
 
 /** Requests outside the pi session (compaction, summaries): one-shot session, text only, tools denied. */

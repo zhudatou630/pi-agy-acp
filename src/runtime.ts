@@ -20,6 +20,8 @@ export interface RuntimeConfig {
 
 /** Resume after a restart is lossless but pays agy's ~2.5 s warmup; one idle process is ~230 MB. */
 const IDLE_SHUTDOWN_MS = 30 * 60_000;
+/** agy's own /compact is one model call; far longer than that and it is not coming back. */
+const COMMAND_TIMEOUT_MS = 5 * 60_000;
 
 /** Sum of two ACP prompt usages (field by field); either may be missing. */
 export function addUsage(a: any, b: any): any {
@@ -74,6 +76,8 @@ export class AcpSession {
   stopped = false;
   /** Cancel never settled: do not reuse without close + resume. */
   broken = false;
+  /** A command for agy itself (/compact) is in flight; settles when it is over, never rejects. */
+  command: Promise<void> | undefined;
   ephemeral = false;
 
   constructor(id: string, cwd: string, setup: any) {
@@ -183,7 +187,7 @@ export class Runtime {
   readonly sessions = new Map<string, AcpSession>();
   /** Catalog-change callbacks of live sessions. */
   readonly listeners = new Set<() => void>();
-  /** Extension instances of live sessions: a request finds its own by pi session id. */
+  /** Extension instances of live sessions: a request finds its own by its run's abort signal. */
   readonly instances = new Set<SessionOwner>();
   readonly timing: Timing = { ...TIMING };
   private idleTimer: NodeJS.Timeout | undefined;
@@ -365,8 +369,35 @@ export class Runtime {
     }
   }
 
+  /**
+   * A slash command for agy itself (/compact), outside any reply: no turn, nothing shown in pi, and
+   * Stop stays in force (only the user's next message lifts it). What agy says on its own meanwhile
+   * opens a reply as usual; a chat prompt waits, because agy would take it as a steer of the command.
+   */
+  command(s: AcpSession, text: string, config: { model?: string; piLevel?: string }, signal?: AbortSignal): Promise<any> {
+    const run = (async () => {
+      await this.applyConfig(s, config); // agy resets the model on resume
+      const proc = await this.ensure();
+      if (signal?.aborted) throw new Error("Cancelled");
+      const onAbort = () => proc.notify("session/cancel", { sessionId: s.id });
+      signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        return await proc.request("session/prompt", { sessionId: s.id, prompt: [{ type: "text", text }] }, COMMAND_TIMEOUT_MS);
+      } catch (err) {
+        if (err instanceof AcpError && err.code === -32001) s.broken = true; // timed out: agy may never end it
+        throw err;
+      } finally {
+        signal?.removeEventListener("abort", onAbort);
+      }
+    })();
+    const settled: Promise<void> = run.then(() => {}, () => {}).then(() => { if (s.command === settled) s.command = undefined; });
+    s.command = settled;
+    return run;
+  }
+
   /** Start a turn, or steer the running one: agy supersedes the previous prompt natively. */
   async prompt(s: AcpSession, blocks: any[]): Promise<Turn> {
+    await s.command;
     const proc = await this.ensure();
     let turn = s.activeTurn && !s.activeTurn.ended ? s.activeTurn : undefined;
     if (!turn) {

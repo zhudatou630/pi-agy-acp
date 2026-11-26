@@ -36,7 +36,7 @@ try {
   const red = fs.readFileSync(new URL("../docs/research/probe/red.b64", import.meta.url), "utf8").trim();
   await session.prompt("What single color fills this image? One word.", { images: [{ type: "image", mimeType: "image/png", data: red }] });
   console.log("answer:", lastText(session));
-  assert.match(lastText(session), /red/i);
+  assert.match(lastText(session), /red|红/i); // agy answers in the language its own rules ask for
 
   step("restart → resume");
   const sid = frames().filter((f) => f.dir === "out" && f.msg.method === "session/prompt").at(-1).msg.params.sessionId;

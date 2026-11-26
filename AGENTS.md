@@ -31,7 +31,8 @@ pi 扩展包：把官方 Antigravity CLI 的 `agy acp` 接成 pi 的 provider `a
 - agy 执行过的操作用隐藏的镜像工具（`agy_*`）展示，镜像工具只等待 ACP 的结果，绝不重新执行。
 - 不把 agy 的 slash 命令注册到 pi，不提供 agy mode 切换；管理命令只有 `/agy`。
 - 压缩不取消 pi 自己的流程：pi 的 `/compact` 先让 agy 压缩再照常做摘要，`/agy compact` 只压缩 agy。
-- 请求归属按 pi session id 找扩展实例，不认“注册 provider 的那个实例”；会话空闲时到来的请求按维护类处理。
+- 请求归属看它属于谁的 agent run（`options.signal` 与实例的 `ctx.signal` 是同一个对象），不认“注册 provider 的那个实例”，也不认 `options.sessionId`；找不到归属的按维护类处理。
+- agy 的 `/compact` 不走 turn，不解除“已停止”状态。
 - factory 和模型列表加载时不启动 agy；agy 进程在第一次真正请求时才懒启动。
 - 只管理自己拉起的进程组；不扫描、不终止其他 agy、language_server 或 hub 进程。
 - 只使用官方的登录流程。不读取、复制或上传 `~/.gemini` 下的凭证，不读写 agy 的私有数据库。

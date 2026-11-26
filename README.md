@@ -42,13 +42,14 @@
 ## 用法
 
 - **权限**：完全放行，和 pi 一样没有审批，agy 会直接执行命令和修改文件，请只在你信任的目录里使用。agy 主动提问（让你在几个选项里挑一个）时会弹出选择框。
-- **只读只是建议**：pi-web 的只读预设、side chat、explore 子代理靠 pi 的工具清单生效，对 agy 不起作用。这些场合插件会告诉 agy“本次请求不要改文件、不要运行会改动东西的命令”，但没有强制手段。
+- **只读只是建议**：pi-web 的只读预设、side chat、只读的子代理靠 pi 的工具清单生效，对 agy 不起作用。这些场合插件会告诉 agy“本次请求不要改文件、不要运行会改动东西的命令”，但没有强制手段。
 - **工具卡片**：`agy_bash`（命令及输出）、`agy_edit` / `agy_write`（并排 diff）、`agy_read`、`agy_tool`、`agy_todo`（计划）。这些卡片只用来展示，pi 不会把这些操作再执行一遍。
 - **运行中发消息**：在 agy 工作时发的消息会立刻转给 agy。停止按钮会向 agy 发送 `session/cancel`。
 - **后台命令**：agy 把耗时命令转到后台时，回复会一直等到命令结束，agy 的结果汇报会接在同一条回复里，和 pi 自己的 bash 一样。dev server 这类常驻进程不会占住回复；之后 agy 如果主动汇报，插件会自动开一轮回复显示出来。
 - **语言**：插件自身的提示文字都是英文；agy 的回答语言跟随你提问的语言。
 - **会话**：每个 pi 会话对应一个 agy 会话，重启后自动接上。fork 出来的会话会新开一个 agy 会话，并附上之前的对话转录。这些会话也会出现在 agy CLI 的会话列表里，可以用 `agy --conversation <id>` 接着聊（`/agy status` 可以看到 id），但不要两边同时用同一个会话。
-- **压缩**：pi 的 `/compact`（和 pi-web 的压缩按钮）会先让 agy 压缩自己的上下文，再照常压缩 pi 的历史，一共两次请求。只想压缩 agy 那边就用 `/agy compact`，一次请求，pi 的历史不动。上下文占用在下一轮回复后更新。
+- **压缩**：pi 的 `/compact`（和 pi-web 的压缩按钮）会先让 agy 压缩自己的上下文，再照常压缩 pi 的历史，比原来多一次请求。只想压缩 agy 那边就用 `/agy compact`，一次请求，pi 的历史不动。上下文占用在下一轮回复后更新。
+- **pi-web 子代理**：子代理要用 antigravity 的模型，它的 profile 需要打开 `load_extensions`。pi-web 内置的 profile 默认没开，那样的子代理只能得到纯文字回答：没有工具卡片，命令会被拒绝，每轮之间也不共享上下文。
 - **规则和约束**：插件不会把 pi 的 system prompt 发给 agy。agy 的规则写在 agy 自己的位置：项目里的 `AGENTS.md` / `GEMINI.md` / `.agents/rules/`，或者全局的 `~/.gemini/`。
 - **agy 自带的 slash 命令**：不会注册到 pi。真要用的话，在 agy 模型下直接输入 `/goal …`，会原样发给 agy。
 - **管理命令**：`/agy status | models refresh | login | new | compact | debug on|off | restart`。只输入 `/agy` 会列出这些子命令。

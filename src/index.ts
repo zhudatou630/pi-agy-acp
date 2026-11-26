@@ -157,7 +157,7 @@ export default function piAgyAcp(pi: ExtensionAPI) {
     ctx = c;
     if (!isOurModel()) return;
     try {
-      await compact(event.signal);
+      if (await compact(event.signal) === "busy") c.ui?.notify?.("agy is still working: only pi's history is compacted this time.", "warning");
     } catch (err) {
       if (!event.signal?.aborted) c.ui?.notify?.(`agy /compact failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
     }

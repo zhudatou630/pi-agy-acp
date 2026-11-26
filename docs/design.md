@@ -28,7 +28,7 @@ pi-web Node 进程（多个 AgentSession）
  │    └─ 事件：session_start 等（取 ctx）、input（steer）、context（剔除唤醒消息）、
  │           session_before_compact（压缩）、session_shutdown
  └─ globalThis[Symbol.for("pi-agy-acp")]  共享 Runtime（跨扩展实例只有一份）
-      ├─ instances    活着的扩展实例，请求按 pi session id 找到自己的那个（见 3.1）
+      ├─ instances    活着的扩展实例，请求按所属的 agent run 找到自己的那个（见 3.1）
       ├─ AgyProcess   懒启动 `agy acp`，独立进程组，崩溃后标记重启
       ├─ AcpConnection  NDJSON JSON-RPC，双向请求，pending 在退出时全部 reject
       ├─ SessionHub   acpSessionId → 事件队列、当前 turn、工具状态表、配置缓存
@@ -63,7 +63,7 @@ sequenceDiagram
   participant R as Runtime / SessionHub
   participant A as agy acp
   W->>P: streamSimple(context, options)
-  P->>R: 按 pi session id 找实例 → binding → 计算新输入
+  P->>R: 按 run 的 signal 找实例 → binding → 计算新输入
   R->>A: (懒启动/resume/set_config_option) session/prompt
   A-->>R: thought / text chunk
   R-->>P: 事件队列
@@ -86,13 +86,15 @@ sequenceDiagram
 
 **取得会话身份。** 每个 pi 会话有自己的扩展实例，实例从 `session_start`、`turn_start` 等事件拿到 ctx，也就知道真实的 pi session id、cwd 和 `ctx.ui`。活着的实例登记在共享 Runtime 的 `instances` 里。
 
-provider 不能假定“注册它的那个实例”就是发请求的会话：provider 属于 ModelRuntime，而 pi-web 的子代理和父会话共用一个 ModelRuntime，后加载的实例会顶掉先注册的。所以每个请求按 `options.sessionId` 找实例：
+provider 不能假定“注册它的那个实例”就是发请求的会话，也不能靠 `options.sessionId` 判断：
 
-1. 注册 provider 的实例匹配（id 相同，或者它是 pi-web 的 side chat、`header.piWebSide.parentSessionId` 等于这个 id）就用它。side chat 被 pi-web 有意设成父会话的 id 当缓存键，但它有自己的实例和 binding，不会和父会话混用 ACP 会话。
-2. 否则在 `instances` 里找 id 完全相同的实例。
-3. 都找不到就是维护类请求。
+- provider 属于 ModelRuntime，而 pi-web 的子代理和父会话共用一个 ModelRuntime，后加载的实例会顶掉先注册的；
+- pi-web 的 side chat 被有意设成父会话的 id 当缓存键；
+- pi-web 的自动命名拿会话的 stream 函数和 session id 另起一个临时 Agent，会话忙或闲时都可能发生。
 
-实例空闲（`ctx.isIdle()`）时到来的请求也算维护类：pi-web 的自动命名会拿会话的 stream 函数和 session id 另起一个临时 Agent，它不属于会话的 agent run。
+所以按**请求属于谁的 agent run** 来找：请求带的 `options.signal` 就是那个 run 的中止信号，和实例的 `ctx.signal` 是同一个对象时，这个请求才是该会话的聊天请求。找不到这样的实例就是维护类请求。已销毁会话的 ctx 一访问就抛错，遇到就把它从 `instances` 里去掉。
+
+子代理的 profile 没开 `load_extensions` 时（pi-web 内置的三个 profile 默认如此），子会话里没有本扩展的实例：它的请求都按维护类处理，能回答，但没有镜像卡片、不能执行命令、每轮都是新的临时会话。要让子代理正常使用 agy 模型，profile 需要开 `load_extensions`。
 
 维护类请求（压缩摘要、自动命名等）走一次性的临时 ACP 会话：只要文字，权限一律拒绝，用完就 `session/close`；stopReason 的映射和正常对话相同，所以被配额拒绝或被 token 上限截断的摘要不会被保存。`disableContinuation` 的缓存预热请求直接返回空结果，不发给 agy；我们本来也不声明 promptCache。
 
@@ -272,7 +274,7 @@ steer 去重用的“已直接发给 agy 的输入”只放在内存里的 turn 
 - 维护类请求（比如压缩时开的临时会话）回 `reject_once`，确保这类请求不会执行任何工具。
 - 没有使用 `--dangerously-skip-permissions`：效果相同，但这样能在抓包里看到每一次放行。
 - agy 主动**提问**（`interaction_*`，让用户在几个选项里挑一个）不算审批，仍然弹出 `select` 让用户回答，10 分钟内不选就算取消。
-- **只读会话只靠一句话约束。** pi-web 的只读预设、explore / plan 子代理靠 pi 的工具清单生效，而工具清单不发给 agy。当前 pi 会话里没有激活任何写类内置工具（`bash`、`powershell`、`edit`、`write`，和 pi-web 的判断相同）时，每个新 prompt 前加一行 `[pi: read-only session. …]`。这只是建议：agy 在 default 模式下写工作区文件不请求权限，没有第二道闸。pi-web 的 side chat 自带一段边界说明，会作为用户文本到达 agy，不需要额外处理。
+- **只读会话只靠一句话约束。** pi-web 的只读预设、explore / plan 子代理（profile 开了 `load_extensions` 的，见 3.1）靠 pi 的工具清单生效，而工具清单不发给 agy。当前 pi 会话里没有激活任何写类内置工具（`bash`、`powershell`、`edit`、`write`，和 pi-web 的判断相同）时，每一轮开头的 prompt 前加一行 `[pi: read-only session. …]`；同一轮里的 steer 不重复加。防重发用的 prompt 哈希不含这行。这只是建议：agy 在 default 模式下写工作区文件不请求权限，没有第二道闸。pi-web 的 side chat 自带一段边界说明，会作为用户文本到达 agy，不需要额外处理。
 
 ### 3.9 进程管理
 
@@ -333,10 +335,16 @@ steer 去重用的“已直接发给 agy 的输入”只放在内存里的 turn 
 
 pi 的压缩只缩短 pi 自己的历史。锚点还在时 ACP 会话继续用，agy 那边的上下文一点没少，上下文占用（取自 agy 的 `usage_update`）也不会降。所以压缩分两路：
 
-- **pi 的 `/compact` 和 pi-web 的压缩按钮**：`session_before_compact` 钩子先在当前分支的 ACP 会话里发 agy 自己的 `/compact` 并等它结束，然后 pi 照常做摘要（走临时会话）。两边都压缩，代价是两次请求。pi 的摘要留着有用：同一个会话之后切到别的模型，读的是 pi 的历史。agy 这一步失败时提示一下，pi 的压缩继续。
-- **`/agy compact`**：只发 agy 的 `/compact`，pi 的历史不动，一次请求。agy 正在工作时拒绝执行（这时再发 prompt 会变成 steer）。
+- **pi 的 `/compact` 和 pi-web 的压缩按钮**：`session_before_compact` 钩子先在 ACP 会话里发 agy 自己的 `/compact` 并等它结束，然后 pi 照常做摘要（走临时会话）。两边都压缩，代价是在 pi 原有的摘要请求之外多一次 agy 的 `/compact`。pi 的摘要留着有用：同一个会话之后切到别的模型，读的是 pi 的历史。agy 这一步失败或做不了时提示一下，pi 的压缩继续。
+- **`/agy compact`**：只发 agy 的 `/compact`，pi 的历史不动，一次请求。
 
-两路共用一段代码：用和 streamSimple 相同的锚点匹配找到当前分支的 ACP 会话，冷启动时先 resume 并重设模型，再发 `/compact`。当前模型不是 agy 时不做。
+两路共用一段代码：
+
+- 用下一次请求会带的上下文（`buildSessionProjection()`）做锚点匹配，找到下一条消息会续接的那个 ACP 会话；冷启动时先 resume 并重设模型。被 pi 压缩掉的锚点不算数。当前模型不是 agy 时不做。
+- 这个 ACP 会话上还有没被 pi 消费完的回复时不做（这时再发 prompt 会变成 steer，或者丢掉回复的尾部）。
+- `/compact` 不是一轮聊天：不建 turn，直接发 `session/prompt` 等结果，最多 5 分钟。期间 agy 主动说的话照常开一轮回复；聊天的 prompt 排在它后面发，免得被 agy 当成对压缩的 steer。
+- 不解除“已停止”状态：用户按停止之后，只有下一条用户消息才恢复权限放行，压缩不算。
+- 只有 `end_turn` 才算压缩成功。
 
 `/compact` 之后上下文占用要到下一轮回复才更新。这次调用的计费不记进 pi（没有消息承载它）。不取消 pi 的压缩，是因为扩展返回取消时 pi 会把它当成一次失败报给用户。
 
@@ -434,7 +442,7 @@ pi-web 已经把 `<来源>_bash/read/edit/write` 这类镜像工具显示成对�
 
 ## 10. 主要风险
 
-0. **依赖宿主怎么调用 provider**：请求归属靠 `options.sessionId` 和 `ctx.isIdle()` 判断（3.1）。pi-web 改变子代理共用 ModelRuntime 的方式、side chat 的 id 约定，或者新增“借会话的 stream 函数发请求”的功能时，都要对照 `test/host.test.ts` 重新确认。
+0. **依赖宿主怎么调用 provider**：请求归属靠 `options.signal` 和 `ctx.signal` 是同一个对象来判断（3.1）。pi 如果以后把信号包一层再传给 provider，所有请求都会被当成维护类；`npm test` 里的端到端用例会全部失败，升级 pi 后要先跑。pi-web 改变子代理共用 ModelRuntime 的方式时，对照 `test/host.test.ts` 重新确认。
 1. **镜像方案依赖 pi 的内部行为**：hiddenDeclarations 下的工具仍然能执行，这一点有源码依据，但还要靠 E2E 测试锁住；responseId 能否保存到下一轮也一样。pi 升级后可能失效，所以 E2E 测试要跟着 pi 版本一起跑。
 2. **agy 1.5.x 的行为变化**：比如 steer 的语义、load 一个不存在的 id 也会成功。agy 会自己更新，版本变化时提示一次（3.9），需要时重新跑冒烟测试。
 3. **压缩和维护类请求**走临时会话，结果质量取决于 agy。agy 自己有 1M 的上下文窗口，也能自动压缩，pi 的自动压缩很少会被触发；触发时和手动压缩走同一条路（3.13）。
@@ -454,9 +462,9 @@ pi-web 已经把 `<来源>_bash/read/edit/write` 这类镜像工具显示成对�
 | 图片 | 已实现 | 真实 agy smoke（能认出红色） |
 | slash 命令 | v0.3 改为不注册，直接透传 | e2e：`/goal …` 原样到达 agy |
 | ACP_DEBUG 抓包和 `npm run acp:tail` | 已实现 | smoke 抓包核对：只发送了用户输入 |
-| 请求按 pi session id 找实例；会话空闲时的请求算维护类 | 已实现 | host.test.ts：子代理共用 ModelRuntime 后父子各自续接；自动命名不进聊天的 ACP 会话 |
+| 请求按所属 agent run 找实例，其余算维护类 | 已实现 | host.test.ts：子代理共用 ModelRuntime 后父子各自续接；side chat 用父会话 id 仍有自己的 ACP 会话；自动命名在会话忙、闲时都不进聊天的 ACP 会话 |
 | 只读会话的一行说明 | 已实现 | host.test.ts |
-| 压缩：钩子先发 agy 的 `/compact`；`/agy compact` | 已实现 | host.test.ts；真实 agy 1.5.17：压缩后下一轮上下文占用下降，之前的内容还记得 |
+| 压缩：钩子先发 agy 的 `/compact`；`/agy compact` | 已实现 | host.test.ts（含：停止后压缩仍拒绝迟到的权限请求；回复没消费完时不压缩）；真实 agy 1.5.17：压缩后下一轮上下文占用下降，之前的内容还记得 |
 | 截断或被拒的摘要不保存 | 已实现 | tree.test.ts |
 
 与设计的偏差：
