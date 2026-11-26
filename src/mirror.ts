@@ -95,8 +95,12 @@ function textOf(s: ToolState): string {
   return parts.join("\n");
 }
 
-function clip(text: string): string {
-  return text.length > MAX_RESULT ? text.slice(0, MAX_RESULT) + `\n… (truncated, ${text.length} chars total)` : text;
+/** Command output keeps its end (errors and summaries are there, like pi's bash), anything else its start. */
+function clip(text: string, keepEnd: boolean): string {
+  if (text.length <= MAX_RESULT) return text;
+  return keepEnd
+    ? `… (truncated, ${text.length} chars total; the end is shown)\n${text.slice(-MAX_RESULT)}`
+    : `${text.slice(0, MAX_RESULT)}\n… (truncated, ${text.length} chars total)`;
 }
 
 export interface MirrorResult {
@@ -131,8 +135,9 @@ export function mirrorResult(s: ToolState): MirrorResult {
     const p = primaryPath(s);
     text = isError ? "Failed" : s.kind === "read" && p ? `Read ${p}` : "Done";
   }
+  text = clip(text, s.kind === "execute");
   if (notes.length) text = `${text}\n${notes.join(" ")}`;
-  return { content: [{ type: "text", text: clip(text) }], details, isError };
+  return { content: [{ type: "text", text }], details, isError };
 }
 
 /** Unified diff for an ACP diff block; line numbers come from locating newText in the current file. */

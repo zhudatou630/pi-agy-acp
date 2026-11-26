@@ -1,14 +1,35 @@
 // How pi-web hosts the provider: shared model runtimes, side requests, tool presets, compaction.
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { after, test } from "node:test";
 import { Agent } from "@earendil-works/pi-agent-core";
+import { SEED_CATALOG } from "../src/catalog.ts";
 import { assistants, createSession, lastText, runtime, setupEnv } from "./helpers.ts";
 
 const env = setupEnv("host");
+// the catalog remembers the agy version of the last run; the fake reports another one
+fs.writeFileSync(path.join(env.home, "catalog.json"), JSON.stringify({ ...SEED_CATALOG, agyVersion: "1.0.0", fetchedAt: Date.now() }));
 after(async () => { await runtime()?.shutdown(); });
 
 const promptSid = () => env.prompts().at(-1).params.sessionId;
 const compacts = (sid: string) => env.prompts().filter((p) => p.params.sessionId === sid && p.params.prompt[0]?.text === "/compact");
+
+test("an agy update since the last run is announced once", async () => {
+  const { session, mock } = await createSession(env);
+  await session.prompt("one");
+  await session.prompt("two");
+  const notices = mock.calls.filter((c) => c.method === "notify" && /agy updated from 1\.0\.0 to 1\.5\.14-fake/.test(c.args[0]));
+  assert.equal(notices.length, 1);
+});
+
+test("a bare /agy offers its subcommands", async () => {
+  const { session, mock } = await createSession(env);
+  mock.answers.select = (options) => options.find((o) => o === "status");
+  await session.prompt("/agy");
+  assert.deepEqual(mock.calls.find((c) => c.method === "select")!.args[1].slice(0, 2), ["status", "models refresh"]);
+  assert.match(mock.calls.filter((c) => c.method === "notify").at(-1)!.args[0], /^agy: .*\nProcess: /);
+});
 
 test("a subagent that loads the extension into its parent's model runtime does not take over the parent", async () => {
   const parent = await createSession(env);

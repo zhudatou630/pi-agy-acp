@@ -21,6 +21,8 @@ const MIRROR_LABELS: Record<string, string> = {
 /** pi's write-capable built-ins; a session with none active is read-only (pi-web's preset uses the same rule). */
 const WRITE_TOOLS = ["bash", "powershell", "edit", "write"];
 
+const SUBCOMMANDS = ["status", "models refresh", "login", "new", "compact", "debug on", "debug off", "restart"];
+
 export default function piAgyAcp(pi: ExtensionAPI) {
   const rt = getRuntime();
   let ctx: any;
@@ -167,17 +169,17 @@ export default function piAgyAcp(pi: ExtensionAPI) {
 
   pi.registerCommand("agy", {
     description: "Antigravity: status | models refresh | login | new | compact | debug on|off | restart",
-    getArgumentCompletions: (prefix: string) => {
-      const items = ["status", "models refresh", "login", "new", "compact", "debug on", "debug off", "restart"];
-      return items.filter((i) => i.startsWith(prefix)).map((value) => ({ value, label: value }));
-    },
+    getArgumentCompletions: (prefix: string) => SUBCOMMANDS.filter((i) => i.startsWith(prefix)).map((value) => ({ value, label: value })),
     handler: async (args, c) => {
       ctx = c;
-      const [sub, ...rest] = args.trim().split(/\s+/);
+      // pi-web has no argument completion: a bare /agy offers the subcommands instead
+      const typed = args.trim() || (c.hasUI ? await c.ui.select("Antigravity", SUBCOMMANDS) : "status");
+      if (!typed) return;
+      const [sub, ...rest] = typed.split(/\s+/);
       const arg = rest.join(" ");
       const notify = (msg: string, level: "info" | "warning" | "error" = "info") => c.ui.notify(msg, level);
       try {
-        switch (sub || "status") {
+        switch (sub) {
           case "status": return notify(status(rt, session));
           case "models": {
             notify("Probing agy models and thinking levels…");

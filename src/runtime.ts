@@ -86,14 +86,23 @@ export class AcpSession {
     if (Array.isArray(options)) this.configOptions = options;
   }
 
+  /** A config option by id, else by category: agy 1.5 uses the same word for both, other builds named the id differently. */
+  option(id: string): any {
+    return this.configOptions.find((o) => o.id === id) ?? this.configOptions.find((o) => o.category === id);
+  }
+
   current(id: string): string | undefined {
-    return this.configOptions.find((o) => o.id === id)?.currentValue;
+    return this.option(id)?.currentValue;
+  }
+
+  /** The option's choices, groups flattened. */
+  choices(id: string): { value: string; name?: string }[] {
+    const options = this.option(id)?.options;
+    return Array.isArray(options) ? options.flatMap((o: any) => (Array.isArray(o.options) ? o.options : [o])) : [];
   }
 
   values(id: string): string[] {
-    const opt = this.configOptions.find((o) => o.id === id);
-    if (!opt || !Array.isArray(opt.options)) return [];
-    return opt.options.flatMap((o: any) => (Array.isArray(o.options) ? o.options : [o])).map((o: any) => o.value);
+    return this.choices(id).map((o) => o.value);
   }
 
   get activeTurn(): Turn | undefined {
@@ -180,6 +189,9 @@ export class Runtime {
   private idleTimer: NodeJS.Timeout | undefined;
   private catalogRefresh: Promise<Catalog> | undefined;
   lastExit: string | undefined;
+  private seenVersion: string | undefined;
+  /** agy updated itself since the last run; shown once in the next chat. */
+  versionNotice: string | undefined;
 
   constructor(home: string) {
     this.home = home;
@@ -190,6 +202,7 @@ export class Runtime {
     this.store.prune(60 * 24 * 3600_000);
     this.catalogFile = path.join(home, "catalog.json");
     this.catalog = loadCatalog(this.catalogFile);
+    this.seenVersion = this.catalog.agyVersion;
     process.once("exit", () => this.proc?.killSync());
   }
 
@@ -344,7 +357,7 @@ export class Runtime {
   private async setOption(s: AcpSession, configId: string, value: string): Promise<void> {
     const proc = await this.ensure();
     try {
-      const res = await proc.request("session/set_config_option", { sessionId: s.id, configId, value }, 30_000);
+      const res = await proc.request("session/set_config_option", { sessionId: s.id, configId: s.option(configId)?.id ?? configId, value }, 30_000);
       s.setConfigOptions(res?.configOptions);
     } catch (err) {
       if (err instanceof AcpError) throw new AcpError(err.method, err.code, `agy rejected ${configId}=${value}: ${err.message}`);
@@ -523,7 +536,7 @@ export class Runtime {
         s.setConfigOptions(u.configOptions);
         break;
       case "current_mode_update": {
-        const mode = s.configOptions.find((o) => o.id === "mode");
+        const mode = s.option("mode");
         if (mode) mode.currentValue = u.currentModeId;
         break;
       }
@@ -595,6 +608,10 @@ export class Runtime {
   private afterSetup(res: any): void {
     const tier = res?._meta?.antigravity?.tier?.name;
     if (tier) this.catalog.tier = tier;
+    if (this.seenVersion && this.agyVersion && this.seenVersion !== this.agyVersion) {
+      this.versionNotice = `agy updated from ${this.seenVersion} to ${this.agyVersion}. Its ACP behavior can change between versions: if replies or tool cards look off, run pi-agy-acp's smoke test.`;
+    }
+    this.seenVersion = this.agyVersion ?? this.seenVersion;
     const stale = !this.catalog.fetchedAt || this.catalog.agyVersion !== this.agyVersion || Date.now() - this.catalog.fetchedAt > 24 * 3600_000;
     if (stale) void this.refreshCatalog().catch((err) => this.debug.write("catalog-error", String(err)));
   }
@@ -613,12 +630,10 @@ export class Runtime {
       probe = new AcpSession(res.sessionId, os.homedir(), res);
       probe.ephemeral = true;
       this.sessions.set(probe.id, probe);
-      const modelOpt = probe.configOptions.find((o) => o.id === "model");
       const models: Catalog["models"] = [];
       const old = new Map(this.catalog.models.map((m) => [m.id, m]));
-      for (const o of modelOpt?.options ?? []) {
-        const r = await proc.request("session/set_config_option", { sessionId: probe.id, configId: "model", value: o.value }, 30_000);
-        probe.setConfigOptions(r?.configOptions);
+      for (const o of probe.choices("model")) {
+        await this.setOption(probe, "model", o.value);
         models.push({ id: o.value, name: o.name ?? o.value, levels: probe.values("thought_level"), contextWindow: old.get(o.value)?.contextWindow });
       }
       if (models.length) {

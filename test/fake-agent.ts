@@ -2,6 +2,7 @@
 // Env: FAKE_LOG (NDJSON of inbound frames), FAKE_STATE (persisted session ids, survives restarts),
 //      FAKE_AUTH=0 (every session call returns -32000).
 // Prompt text containing SCRIPT:<name> selects a script; anything else is echoed.
+// SCRIPT:replay <file> plays a recorded exchange from test/fixtures.
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import readline from "node:readline";
@@ -300,6 +301,24 @@ function serve() {
         if (LOG) fs.appendFileSync(LOG, JSON.stringify({ grandchild: child.pid }) + "\n");
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `spawned ${child.pid}` } });
         return finish("end_turn");
+      }
+      case "replay": {
+        // a recorded agy exchange (probe or ACP_DEBUG capture): its inbound frames in order, pauses shortened
+        const frames = fs.readFileSync(/SCRIPT:replay (\S+)/.exec(text)![1], "utf8").trim().split("\n").map((l) => JSON.parse(l));
+        let last = frames[0].t;
+        for (const f of frames) {
+          const pause = Math.min(((f.t - last) * SETTLE) / 2000, SETTLE * 1.5);
+          last = f.t;
+          if (f.dir !== "in") continue;
+          await sleep(pause);
+          if (f.msg.method === "session/update") u(f.msg.params.update);
+          else if (f.msg.method === "session/request_permission") await ask(f.msg.method, { ...f.msg.params, sessionId });
+          else if (f.msg.result?.stopReason) {
+            running.delete(sessionId);
+            send({ jsonrpc: "2.0", id: run.promptId, result: f.msg.result });
+          }
+        }
+        return;
       }
       case "fail429":
         running.delete(sessionId);

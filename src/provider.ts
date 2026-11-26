@@ -196,6 +196,10 @@ async function run(registered: Instance, model: Model<any>, messages: any[], opt
     session.owner = inst;
     inst.attach(session, file, b);
     if (notice) ctx.ui?.notify?.(notice, "warning");
+    if (rt.versionNotice) {
+      ctx.ui?.notify?.(rt.versionNotice, "warning");
+      rt.versionNotice = undefined;
+    }
     writer = new Writer(stream, model, newResponseId(session.id));
 
     let turn = session.activeTurn;
@@ -215,7 +219,7 @@ async function run(registered: Instance, model: Model<any>, messages: any[], opt
       if (b!.failedKey === key) {
         // pi retries "transient" errors by resending; agy may already have acted on this prompt
         b!.failedKey = undefined;
-        return failWith(rt, file, b!, writer, "error", "agy failed on the previous attempt; not resending automatically so it does not repeat its actions. Send again to retry.");
+        return failWith(rt, file, b!, writer, "error", "agy failed on the previous attempt (see the error above); not resending automatically so it does not repeat its actions. Send again to retry.");
       }
       await rt.applyConfig(session, { model: model.id, piLevel: (options as any).reasoning });
       const payload = await applyPayloadHook(options, { sessionId: session.id, prompt }, model);

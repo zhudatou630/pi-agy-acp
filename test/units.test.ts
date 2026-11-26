@@ -9,6 +9,7 @@ import { mapThinkingLevel, toPiModels, SEED_CATALOG } from "../src/catalog.ts";
 import { redact } from "../src/debug.ts";
 import { mergeToolUpdate, mirrorCall, mirrorResult, unifiedDiff } from "../src/mirror.ts";
 import { historyTranscript, inputsToBlocks, REPLAY_MAX_CHARS } from "../src/replay.ts";
+import { AcpSession } from "../src/runtime.ts";
 import { TIMING, Turn } from "../src/turn.ts";
 
 test("thinking level mapping clamps to what the model offers", () => {
@@ -223,6 +224,28 @@ test("replay edge cases: cut mid tool loop, background and exit codes, note budg
   assert.ok(mb.text.length - userChars <= REPLAY_MAX_CHARS, String(mb.text.length - userChars));
   assert.match(gaps[0].text, /omitted here\]\n\nq0\n\n[^\n]+\ns1\n\n\[output from other models omitted here\]\n\nq1/);
   assert.match(plan, /\[plan\]\n- \[x\] step one\n- \[ \] \*\*in progress\*\* step two/);
+});
+
+test("long command output keeps its end and the exit note; other results keep their start", () => {
+  const long = "x".repeat(30_000) + "\nError: build failed";
+  const failed = mirrorResult({ id: "c", kind: "execute", status: "completed", rawOutput: { output: long, exit_code: 2 }, content: [], locations: [] });
+  assert.match(failed.content[0].text, /^… \(truncated, 30020 chars total; the end is shown\)\n/);
+  assert.match(failed.content[0].text, /Error: build failed\nexit 2$/);
+  const read = mirrorResult({ id: "r", kind: "read", status: "completed", content: [{ type: "content", content: { type: "text", text: "head" + "y".repeat(30_000) } }], locations: [] });
+  assert.match(read.content[0].text, /^head/);
+  assert.match(read.content[0].text, /truncated, 30004 chars total\)$/);
+});
+
+test("config options are found by id, else by category, with grouped choices flattened", () => {
+  const s = new AcpSession("s", "/x", { configOptions: [
+    { id: "model", category: "model", currentValue: "a", options: [{ name: "Group", options: [{ value: "a" }, { value: "b" }] }, { value: "c" }] },
+    { id: "thinking_level", category: "thought_level", currentValue: "low", options: [{ value: "low" }, { value: "high" }] },
+  ] });
+  assert.deepEqual(s.values("model"), ["a", "b", "c"]);
+  assert.deepEqual(s.values("thought_level"), ["low", "high"]);
+  assert.equal(s.current("thought_level"), "low");
+  assert.equal(s.option("thought_level").id, "thinking_level", "set_config_option sends the id agy announced");
+  assert.deepEqual(s.values("mode"), []);
 });
 
 test("turn phases: agy's own work ends on silence, sized by what it did last", () => {

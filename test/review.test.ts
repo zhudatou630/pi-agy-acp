@@ -1,5 +1,6 @@
 // Regression tests for the review findings (concurrency, steer order, retry, crash, close).
 import assert from "node:assert/strict";
+import path from "node:path";
 import { after, test } from "node:test";
 import { assistants, createSession, lastText, runtime, setupEnv, sleep, until } from "./helpers.ts";
 
@@ -197,6 +198,20 @@ test("a command agy reruns on its own holds the reply until agy reports on it", 
   await session.prompt("SCRIPT:bgrerun");
   assert.ok(!session.messages.some((m: any) => m.role === "custom" && m.customType === "agy-wake"), "the report after the rerun must not open a wake reply");
   assert.match(lastText(session), /rerun reported/);
+});
+
+test("recorded agy 1.5.14 exchange: a background command, then agy reads, writes and runs on its own, in one reply", async () => {
+  const { session } = await createSession(env);
+  await session.prompt(`SCRIPT:replay ${path.join(import.meta.dirname, "fixtures/agy-1.5.14-background-multistep.ndjson")}`);
+  const calls = assistants(session).flatMap((m: any) => m.content.filter((c: any) => c.type === "toolCall"));
+  assert.deepEqual(calls.map((c: any) => c.name), ["agy_bash", "agy_read", "agy_write", "agy_bash"]);
+  const results = session.messages.filter((m: any) => m.role === "toolResult");
+  assert.equal(results[0].content[0].text, "No output from the command.", "the held command's card shows its end, not 'still running'");
+  assert.match(results[2].details.patch, /^--- \/dev\/null\n\+\+\+ b\/tmp\/agy-probe\/ws\/report\.md\n/);
+  assert.equal(results[3].content[0].text, "286 report.md\n");
+  assert.ok(!session.messages.some((m: any) => m.role === "custom" && m.customType === "agy-wake"), "agy's silent steps do not split the reply");
+  assert.match(lastText(session), /286$/);
+  assert.equal(assistants(session).at(-1).usage.totalTokens, 10631, "context size from agy's last usage_update");
 });
 
 test("a normal command whose title mentions 'schedule' still holds the reply", async () => {
