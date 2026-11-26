@@ -38,7 +38,7 @@ if (mode === "mcp") {
       process.exit(1);
     }
     process.stdout.write(`${msg.text}\n`);
-    process.exit(msg.ok ? 0 : 1);
+    process.exitCode = msg.ok ? 0 : 1; // no process.exit(): let a piped stdout drain first
   });
 } else {
   process.stderr.write("usage: pi-agent mcp <socket> | pi-agent wait --socket <socket> <agent id...>\n");

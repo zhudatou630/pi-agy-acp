@@ -354,8 +354,8 @@ pi 的压缩只缩短 pi 自己的历史。锚点还在时 ACP 会话继续用�
 
 让 agy 按用户要求调用 pi-web 的子代理，界面和原生子代理一致：父会话里的卡片能点进子会话，右上角 Agents 列表里能看到。只在 pi-web 里提供，pi TUI 不提供。
 
-- **发起：MCP 工具 `subagent`**。agy 自定义工具只有 MCP 一个入口。插件在 `session/new`、`session/resume` 时传一个 stdio MCP server `pi`（`src/pi-agent.mjs mcp`，env 里带一次性 token），它只把 MCP 消息经 unix socket 转给 pi 进程里的插件。工具描述列出可用的 profile 和模型，并写明只在用户明确要求时调用。参数：`prompt`、`description`、`subagent_type`、`model`、`thinking`，或 `resume`（子代理 id）加 `prompt`。
-- **由 pi-web 运行**：插件调 pi-web 的子代理桥（`globalThis[Symbol.for("pi-web.subagent-bridge.v1")]`，pi-web 的 `lib/subagent-bridge.ts`），profile、模型范围、子会话、Agents 列表都是 pi-web 原生的。桥的可用范围和该会话的 `Agent` 工具相同（项目开着子代理、有启用的 profile、不是只读或仅聊天、本身不是子代理），另外排除 side chat。拿不到桥或桥说不可用时，`mcpServers` 为 `[]`。
+- **发起：MCP 工具 `subagent`**。agy 自定义工具只有 MCP 一个入口。插件在 `session/new`、`session/resume` 时传一个 stdio MCP server `pi`（`src/pi-agent.mjs mcp`，env 里带一次性 token，中继连上后即作废），它只把 MCP 消息经 unix socket 转给 pi 进程里的插件。工具描述列出可用的 profile 和模型，并写明只在用户明确要求时调用。参数：`prompt`、`description`、`subagent_type`、`model`、`thinking`，或 `resume`（子代理 id）加 `prompt`。
+- **由 pi-web 运行**：插件调 pi-web 的子代理桥（`globalThis[Symbol.for("pi-web.subagent-bridge.v1")]`，pi-web 的 `lib/subagent-bridge.ts`），profile、模型范围、子会话、Agents 列表都是 pi-web 原生的。桥的可用范围和该会话的 `Agent` 工具相同（项目开着子代理、有启用的 profile、不是仅聊天、本身不是子代理；pi-web 的只读预设不关 `Agent`，这里也一样），另外排除 side chat。拿不到桥或桥说不可用时，`mcpServers` 为 `[]`。
 - **立即返回，后台等待**：agy 给一次 MCP 调用最多 180 秒，进度通知和任何超时字段都延长不了（handshake §13）。所以工具发起后马上返回子代理 id 和一条命令 `pi-agent wait --socket … <id…>`。agy 用自己的 run_command 跑它，命令转后台，子代理结束时命令打印报告并退出，agy 被唤醒后读到报告，相当于 pi-web 原生的“结果送达”。多个 id 放进一条命令，全部完成才返回。已完成的 id 立即返回，所以它同时是“查看结果”。
 - **卡片**：agy 先发 `tool_call`（`mcp_pi_subagent`，server 名后可能带哈希）和权限请求，然后才调到 MCP，并且一次只调一个。插件把这张卡片的 id 当作子代理的父工具调用，把 pi-web 返回的 details（`kind: "pi-web-subagent"`）放进镜像结果，pi-web 据此显示进入子会话的箭头。`pi-agent wait` 是普通命令卡片。
 - **停止**：照 pi-web 原生规则，父会话按停止不停子代理。agy 会终止 wait 命令，子代理继续跑，下一轮可以再 wait。用户要停子代理就到子会话里停。

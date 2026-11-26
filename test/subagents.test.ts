@@ -73,3 +73,17 @@ test("a session pi-web does not let delegate gets no MCP server", async () => {
   assert.deepEqual(news(from).map((f) => f.params.mcpServers), [[]]);
   assert.equal(lastText(session), "no pi tool");
 });
+
+test("on a fresh install the socket's directory is created, and waiting for an unknown agent fails", async () => {
+  const { SubagentHost } = await import("../src/subagents.ts");
+  const { execFile } = await import("node:child_process");
+  const home = `${env.root}/fresh/home`; // does not exist yet
+  allowed.add("fresh");
+  const host = new SubagentHost(home, new Map(), () => {});
+  assert.equal(host.mcpServers("fresh")[0].name, "pi");
+  (globalThis as any)[Symbol.for("pi-web.subagent-bridge.v1")].wait = async (id: string) => { throw new Error(`Unknown subagent: ${id}`); };
+  const [cmd, ...args] = host.waitCommand(["nope"]).split(" ").map((a: string) => a.replace(/^'|'$/g, ""));
+  const result = await new Promise<{ code: number | null; out: string }>((r) => execFile(cmd, args, (err, out) => r({ code: err ? (err as any).code : 0, out })));
+  assert.equal(result.code, 1);
+  assert.match(result.out, /Unknown subagent: nope/);
+});

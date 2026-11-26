@@ -65,9 +65,13 @@ export class SubagentHost {
 
   private listen(): void {
     if (this.server) return;
+    fs.mkdirSync(path.dirname(this.socket), { recursive: true }); // a fresh install has no home yet
     fs.rmSync(this.socket, { force: true }); // left by a crashed process with our pid
     const server = net.createServer((c) => this.connection(c));
-    server.on("error", (err) => this.log("agents-socket", String(err)));
+    server.on("error", (err) => {
+      this.log("agents-socket", String(err));
+      if (this.server === server) this.server = undefined; // the next session tries again
+    });
     server.listen(this.socket);
     server.unref();
     process.once("exit", () => fs.rmSync(this.socket, { force: true }));
@@ -82,7 +86,10 @@ export class SubagentHost {
       try { msg = JSON.parse(line); } catch { return c.destroy(); }
       if (piSessionId) return void this.mcp(c, piSessionId, msg);
       // the first line says who is calling
-      if (typeof msg?.mcp === "string" && this.tokens.has(msg.mcp)) piSessionId = this.tokens.get(msg.mcp);
+      if (typeof msg?.mcp === "string" && this.tokens.has(msg.mcp)) {
+        piSessionId = this.tokens.get(msg.mcp);
+        this.tokens.delete(msg.mcp); // one relay per token: a captured one is useless afterwards
+      }
       else if (Array.isArray(msg?.wait)) void this.wait(c, msg.wait.map(String));
       else c.destroy();
     });
@@ -108,7 +115,7 @@ export class SubagentHost {
     }
   }
 
-  private async call(tokenSessionId: string, params: any): Promise<object> {
+  private async call(parentSessionId: string, params: any): Promise<object> {
     const reply = (text: string, isError = false) => ({ content: [{ type: "text", text }], isError });
     const b = bridge();
     if (params.name !== TOOL) return reply(`Unknown tool: ${params.name}`, true);
@@ -116,8 +123,6 @@ export class SubagentHost {
     const args = params.arguments ?? {};
     const meta = params._meta ?? {};
     const acp = this.sessions.get(meta["antigravity.google/root_conversation_id"] ?? meta["antigravity.google/conversation_id"]);
-    let parentSessionId = tokenSessionId;
-    try { parentSessionId = acp?.owner?.sessionId() ?? tokenSessionId; } catch {} // a disposed session's ctx throws
     // agy announces the call (tool_call, permission) before it reaches us, one call at a time:
     // that card is the parent tool call the child links back to
     const card = acp && [...acp.tools.values()].reverse().find((t) => isSubagentTool(t.name) && !t.subagent && !isTerminal(t));
@@ -153,17 +158,19 @@ export class SubagentHost {
 
   private async wait(c: net.Socket, ids: string[]): Promise<void> {
     const b = bridge();
+    let ok = !!b;
     const parts = b
       ? await Promise.all(ids.map(async (id) => {
         try {
           const { run, text } = await b.wait(id);
           return `## pi agent ${id} (${run.profile}: ${run.description}): ${run.status}\n\n${text}\n\n[To follow up, call ${TOOL} with resume: "${id}"]`;
         } catch (err) {
+          ok = false;
           return `## pi agent ${id}\n\n${err instanceof Error ? err.message : String(err)}`;
         }
       }))
       : ["Pi Web sub-agents are not available in this process."];
-    if (!c.destroyed) c.end(JSON.stringify({ ok: !!b, text: parts.join("\n\n") }) + "\n");
+    if (!c.destroyed) c.end(JSON.stringify({ ok, text: parts.join("\n\n") }) + "\n");
   }
 }
 
