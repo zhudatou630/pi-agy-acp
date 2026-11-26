@@ -41,6 +41,8 @@ function serve() {
   const waiting = new Map<string | number, (v: any) => void>();
   const running = new Map<string, { promptId: number | string; cancelled: boolean; steers: string[] }>();
   const cancelledSessions = new Set<string>();
+  /** mcpServers from session/new|resume, as agy keeps them per session. */
+  const mcpServers = new Map<string, any[]>();
   let slowCompact = false;
 
   const send = (m: any) => process.stdout.write(JSON.stringify(m) + "\n");
@@ -304,6 +306,51 @@ function serve() {
         u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "about to crash" } });
         await sleep(50);
         process.exit(3);
+      case "subagent": {
+        // like agy 1.5.14 with the client's MCP server: tool_call, permission, then the MCP call (agy
+        // allows it 180 s; real agy may put a hash after the server name); the wait command it returns goes to the background like any long command
+        const server = mcpServers.get(sessionId)?.[0];
+        if (!server) {
+          u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "no pi tool" } });
+          return finish("end_turn");
+        }
+        const mcp = mcpClient(server);
+        await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "antigravity-client", version: "v1.0.0" } });
+        mcp.notify("notifications/initialized");
+        const list = await mcp.request("tools/list", {});
+        if (LOG) fs.appendFileSync(LOG, JSON.stringify({ mcpTools: list.tools }) + "\n");
+        const args = /SCRIPT:subagent resume/.test(text) ? { prompt: "and now the tests", resume: "child-1" } : { prompt: "review a.ts", description: "review a.ts", subagent_type: "explore", model: "claude/opus" };
+        const call = { toolCallId: "call_sub", name: "mcp_pi_9f9e3b21_subagent", kind: "other", title: "Run mcp_pi_9f9e3b21_subagent", rawInput: { ...args, toolSummary: "Ask a pi agent" } };
+        u({ sessionUpdate: "tool_call", ...call, status: "in_progress" });
+        u({ sessionUpdate: "tool_call_update", ...call, status: "pending" });
+        await ask("session/request_permission", { sessionId, toolCall: { ...call, status: "pending" }, options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }] });
+        u({ sessionUpdate: "tool_call_update", ...call, status: "in_progress" });
+        const meta = { "antigravity.google/conversation_id": sessionId, "antigravity.google/root_conversation_id": sessionId };
+        const res = await mcp.request("tools/call", { _meta: meta, name: "subagent", arguments: args });
+        const out = res.content[0].text;
+        u({ sessionUpdate: "tool_call_update", ...call, status: res.isError ? "failed" : "completed", content: [{ type: "content", content: { type: "text", text: out } }] });
+        const cmd = out.split("\n").find((l: string) => l.includes(" 'wait' "));
+        if (!cmd) {
+          u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `tool said: ${out}` } });
+          mcp.close();
+          return finish("end_turn");
+        }
+        const wait = { toolCallId: "call_wait", kind: "execute", title: cmd, rawInput: { CommandLine: cmd, IsDaemon: false, WaitMsBeforeAsync: 500 } };
+        u({ sessionUpdate: "tool_call", ...wait, status: "in_progress" });
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "waiting for the pi agent. " } });
+        finish("end_turn");
+        const child = spawn("sh", ["-c", cmd], { stdio: ["ignore", "pipe", "pipe"] });
+        let output = "";
+        child.stdout.on("data", (d) => { output += d; });
+        child.stderr.on("data", (d) => { output += d; });
+        const code = await new Promise<number | null>((r) => child.on("exit", r));
+        u({ sessionUpdate: "tool_call_update", ...wait, status: "completed", rawOutput: { output, exit_code: code } });
+        await sleep(100);
+        u({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `report received: ${output.trim()}` } });
+        u({ sessionUpdate: "usage_update", used: 1400, size: 1048576 });
+        mcp.close();
+        return;
+      }
       case "grandchild": {
         const child = spawn("sleep", ["600"], { stdio: "ignore" });
         if (LOG) fs.appendFileSync(LOG, JSON.stringify({ grandchild: child.pid }) + "\n");
@@ -373,11 +420,13 @@ function serve() {
         const id = `fake-${process.pid}-${++counter}`;
         known.add(id);
         persist();
+        mcpServers.set(id, p.mcpServers ?? []);
         return reply(setup(id));
       }
       case "session/list":
         return reply({ sessions: [...known].map((sessionId) => ({ sessionId, cwd: "/tmp", title: "t" })) });
       case "session/resume":
+        mcpServers.set(p.sessionId, p.mcpServers ?? []);
         if (!known.has(p.sessionId)) return reply(setup(p.sessionId)); // like agy: unknown ids "succeed"
         return reply(setup(p.sessionId));
       case "session/close":
@@ -412,4 +461,23 @@ function serve() {
     }
   });
   rl.on("close", () => process.exit(0));
+}
+
+/** agy's side of a stdio MCP server from mcpServers: newline-delimited JSON-RPC. */
+function mcpClient(server: { command: string; args?: string[]; env?: { name: string; value: string }[] }) {
+  const env = { ...process.env, ...Object.fromEntries((server.env ?? []).map((e) => [e.name, e.value])) };
+  const child = spawn(server.command, server.args ?? [], { env, stdio: ["pipe", "pipe", "inherit"] });
+  const pending = new Map<number, (v: any) => void>();
+  let id = 0;
+  readline.createInterface({ input: child.stdout }).on("line", (line) => {
+    const msg = JSON.parse(line);
+    pending.get(msg.id)?.(msg.result ?? { error: msg.error });
+    pending.delete(msg.id);
+  });
+  const write = (m: object) => child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
+  return {
+    request: (method: string, params: object) => new Promise<any>((resolve) => { pending.set(++id, resolve); write({ id, method, params }); }),
+    notify: (method: string) => write({ method }),
+    close: () => child.stdin.end(),
+  };
 }

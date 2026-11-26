@@ -7,9 +7,10 @@ import { BindingStore } from "./bindings.ts";
 import { type Catalog, loadCatalog, mapThinkingLevel, saveCatalog } from "./catalog.ts";
 import { DebugLog } from "./debug.ts";
 import { isTerminal, mergeToolUpdate, type ToolState } from "./mirror.ts";
+import { SubagentHost } from "./subagents.ts";
 import { holdsTurn, runsForever, TIMING, type Timing, Turn } from "./turn.ts";
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.4.0";
 
 /** ~/.pi/agent/pi-agy-acp/config.json */
 export interface RuntimeConfig {
@@ -190,6 +191,8 @@ export class Runtime {
   /** Extension instances of live sessions: a request finds its own by its run's abort signal. */
   readonly instances = new Set<SessionOwner>();
   readonly timing: Timing = { ...TIMING };
+  /** pi-web sub-agents offered to agy (MCP tool + wait command). */
+  readonly agents: SubagentHost;
   private idleTimer: NodeJS.Timeout | undefined;
   private catalogRefresh: Promise<Catalog> | undefined;
   lastExit: string | undefined;
@@ -207,6 +210,7 @@ export class Runtime {
     this.catalogFile = path.join(home, "catalog.json");
     this.catalog = loadCatalog(this.catalogFile);
     this.seenVersion = this.catalog.agyVersion;
+    this.agents = new SubagentHost(home, this.sessions, (kind, data) => this.debug.write(kind, data));
     process.once("exit", () => this.proc?.killSync());
   }
 
@@ -297,10 +301,11 @@ export class Runtime {
     return ids;
   }
 
-  async newSession(cwd: string): Promise<AcpSession> {
+  /** `owner`: the chat this session serves (it may get the sub-agent tool); none for throwaway sessions. */
+  async newSession(cwd: string, owner?: SessionOwner): Promise<AcpSession> {
     const proc = await this.ensure();
     try {
-      const res = await proc.request("session/new", { cwd, mcpServers: [] }, 60_000);
+      const res = await proc.request("session/new", { cwd, mcpServers: this.agents.mcpServers(owner?.sessionId()) }, 60_000);
       const s = new AcpSession(res.sessionId, cwd, res);
       this.sessions.set(s.id, s);
       this.afterSetup(res);
@@ -315,7 +320,7 @@ export class Runtime {
    * Reattach a persisted ACP session. Uses session/list first because agy "loads" unknown ids
    * as empty sessions instead of failing. Returns undefined when the session is gone.
    */
-  async resumeSession(id: string, cwd: string): Promise<AcpSession | undefined> {
+  async resumeSession(id: string, cwd: string, owner?: SessionOwner): Promise<AcpSession | undefined> {
     const live = this.sessions.get(id);
     if (live && !live.broken) return live;
     const proc = await this.ensure();
@@ -326,7 +331,7 @@ export class Runtime {
       }
       const ids = await this.listSessionIds();
       if (!ids.has(id)) return undefined;
-      const res = await proc.request("session/resume", { sessionId: id, cwd, mcpServers: [] }, 60_000);
+      const res = await proc.request("session/resume", { sessionId: id, cwd, mcpServers: this.agents.mcpServers(owner?.sessionId()) }, 60_000);
       const s = new AcpSession(id, cwd, res);
       this.sessions.set(id, s);
       this.afterSetup(res);

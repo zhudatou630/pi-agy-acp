@@ -350,6 +350,19 @@ pi 的压缩只缩短 pi 自己的历史。锚点还在时 ACP 会话继续用�
 
 `/compact` 之后上下文占用要到下一轮回复才更新。这次调用的计费不记进 pi（没有消息承载它）。不取消 pi 的压缩，是因为扩展返回取消时 pi 会把它当成一次失败报给用户。
 
+### 3.14 pi-web 子代理（v0.4）
+
+让 agy 按用户要求调用 pi-web 的子代理，界面和原生子代理一致：父会话里的卡片能点进子会话，右上角 Agents 列表里能看到。只在 pi-web 里提供，pi TUI 不提供。
+
+- **发起：MCP 工具 `subagent`**。agy 自定义工具只有 MCP 一个入口。插件在 `session/new`、`session/resume` 时传一个 stdio MCP server `pi`（`src/pi-agent.mjs mcp`，env 里带一次性 token，中继连上后即作废），它只把 MCP 消息经 unix socket 转给 pi 进程里的插件。工具描述列出可用的 profile 和模型，并写明只在用户明确要求时调用。参数：`prompt`、`description`、`subagent_type`、`model`、`thinking`，或 `resume`（子代理 id）加 `prompt`。
+- **由 pi-web 运行**：插件调 pi-web 的子代理桥（`globalThis[Symbol.for("pi-web.subagent-bridge.v1")]`，pi-web 的 `lib/subagent-bridge.ts`），profile、模型范围、子会话、Agents 列表都是 pi-web 原生的。桥的可用范围和该会话的 `Agent` 工具相同（项目开着子代理、有启用的 profile、不是仅聊天、本身不是子代理；pi-web 的只读预设不关 `Agent`，这里也一样），另外排除 side chat。拿不到桥或桥说不可用时，`mcpServers` 为 `[]`。
+- **立即返回，后台等待**：agy 给一次 MCP 调用最多 180 秒，进度通知和任何超时字段都延长不了（handshake §13）。所以工具发起后马上返回子代理 id 和一条命令 `pi-agent wait --socket … <id…>`。agy 用自己的 run_command 跑它，命令转后台，子代理结束时命令打印报告并退出，agy 被唤醒后读到报告，相当于 pi-web 原生的“结果送达”。多个 id 放进一条命令，全部完成才返回。已完成的 id 立即返回，所以它同时是“查看结果”。
+- **卡片**：agy 先发 `tool_call`（`mcp_pi_subagent`，server 名后可能带哈希）和权限请求，然后才调到 MCP，并且一次只调一个。插件把这张卡片的 id 当作子代理的父工具调用，把 pi-web 返回的 details（`kind: "pi-web-subagent"`）放进镜像结果，pi-web 据此显示进入子会话的箭头。`pi-agent wait` 是普通命令卡片。
+- **停止**：照 pi-web 原生规则，父会话按停止不停子代理。agy 会终止 wait 命令，子代理继续跑，下一轮可以再 wait。用户要停子代理就到子会话里停。
+- **递归**：子代理会话里没有 `Agent` 工具，桥对它不可用，它的 agy 会话不挂 MCP。
+- **不做**：`steer_subagent`、`abort_subagent`、后台完成后主动推送。需要时再加成 MCP 工具（即时操作走 MCP，长时间等待才走命令）。
+- **限制**：工具列表在 agy 启动 MCP server 时读一次，profile 或模型的改动要等下次新开或恢复 ACP 会话才生效；同一个 agy 进程里多次 resume 同一会话时，旧的 MCP server 要等 agy 退出才结束。
+
 ## 4. 发给 agy 的内容（干净性约定）
 
 1. **会出现在 `session/prompt` 里的内容**：
@@ -360,8 +373,8 @@ pi 的压缩只缩短 pi 自己的历史。锚点还在时 ACP 会话继续用�
    - slash 命令的原文；压缩时由插件代发的 `/compact`（3.13）。
 
    除此以外没有别的。
-2. **`session/new` 的参数**：`{cwd, mcpServers: []}`，不带 `_meta`。
-3. **不会发送的**：pi 的 system prompt、工具清单、skills、AGENTS.md、时间戳、pi 内部 id。
+2. **`session/new` / `session/resume` 的参数**：`{cwd, mcpServers}`，不带 `_meta`。pi-web 允许委派的聊天会话有一个 MCP server `pi`，只提供子代理工具（3.14）；其余会话是 `[]`。
+3. **不会发送的**：pi 的 system prompt、工具清单、skills、AGENTS.md、时间戳、pi 内部 id。例外只有子代理工具的描述（可用 profile 和模型）和它返回的子代理 id、等待命令（3.14）。
 4. **`initialize` 的参数**：`clientInfo` 如实写 `pi-agy-acp/<version>`；`fs` 和 `terminal` 都声明为 false，agy 用它自己的工具。
 5. 以上全部可以通过 ACP_DEBUG 的 `out` 帧逐条核对。
 
@@ -397,6 +410,7 @@ replay 上限（6 万字符）、空闲退出（30 分钟）、卡死保护（10
 | 单元 | JSON-RPC 分帧和双向请求；ACP 事件 → pi 事件，包括 index 配对和唯一的终止事件；diff 生成；锚点匹配和 delivered 去重；replay 截断；权限选项映射 |
 | 集成（provider + 假 agent） | 文本和思考流；tool → toolUse → 镜像 resolve → 续接；150 ms 内的并行合并；权限的允许、拒绝、超时、无 UI；取消；steer 不重发；进程重启后 resume 并重新设置配置；list 里没有该会话时 replay；未登录提示；崩溃不自动重发；进程组清理后不留孙子进程 |
 | pi SDK 端到端 | 用 `createAgentSessionServices` 在进程内跑真实的 agent loop：验证镜像工具对模型隐藏但可以执行、toolResult 续接、fork 后新建 ACP 会话、压缩后保留 ACP 会话、responseId 能保存到下一轮 |
+| 子代理（`test/subagents.test.ts`） | 假 agy 按真实顺序走 MCP：tool_call、权限、tools/call；假的 pi-web 桥记录 start/resume 参数；真的 `pi-agent wait` 经 socket 取报告；不允许委派的会话 `mcpServers` 为空 |
 | 宿主行为（`test/host.test.ts`） | pi-web 的做法照搬到 SDK 上：子代理共用父会话的 ModelRuntime、自动命名的临时 Agent、只读工具集、压缩钩子、`/agy compact` |
 | 实录回放（`test/fixtures/`） | 真实 agy 抓包里的一段（后台命令结束后 agy 自己读、写、跑命令）由假 agent 按原顺序重放，停顿按比例缩短 |
 | 真机冒烟（手动，`npm run smoke`） | 真实的 agy，flash + low：一次带工具的对话；重启后 resume；图片；`/agy compact` 后上下文下降；取消；steer |
@@ -431,11 +445,11 @@ pi-web 已经把 `<来源>_bash/read/edit/write` 这类镜像工具显示成对�
 - [ ] 抓包默认关闭；开启后对图片脱敏、文件权限 0600、不记录环境变量，也不记录任何凭据。
 - [ ] 不修改 agy 的遥测设置（是否加 `--disable-telemetry` 由用户通过 `extraArgs` 决定）。
 - [ ] 遵守 Antigravity 的服务条款：ACP 是官方提供的客户端集成接口，正常的人机交互使用属于预期用途。**这只是判断，不是法律意见**；无人值守的批量自动化不在本扩展的设计目标之内。
-- [ ] 不改动 pi-web 源码；需要 pi-web 配合的地方都放在第 7 节，单独列出。
+- [ ] 需要 pi-web 配合的地方列在第 7 节；子代理桥（3.14）由 pi-web 提供，插件不改 pi-web 源码。
 
 ## 9. 这一版不做的
 
-- 把 pi 的工具或 MCP 暴露给 agy（反向桥）。
+- 把 pi 的其他工具或 MCP 暴露给 agy（反向桥只开放子代理一项，3.14）。
 - 用 `session/load` 把 agy 的原生会话导入 pi。
 - 支持 agy 的多个 `--agent`。
 - TUI 专用的 renderCall/renderResult 美化：TUI 先用默认渲染，pi-web 是重点。
@@ -468,6 +482,7 @@ pi-web 已经把 `<来源>_bash/read/edit/write` 这类镜像工具显示成对�
 | 只读会话的一行说明 | 已实现 | host.test.ts |
 | 压缩：钩子先发 agy 的 `/compact`；`/agy compact` | 已实现 | host.test.ts（含：停止后压缩仍拒绝迟到的权限请求；回复没消费完时不压缩）；真实 agy 1.5.17：压缩后下一轮上下文占用下降，之前的内容还记得 |
 | 截断或被拒的摘要不保存 | 已实现 | tree.test.ts |
+| pi-web 子代理（MCP 发起、命令等待） | 已实现 | subagents.test.ts；真实 agy 1.5.x：flash-low 调用工具、把 wait 放到后台、完成后自己报出报告 |
 
 与设计的偏差：
 

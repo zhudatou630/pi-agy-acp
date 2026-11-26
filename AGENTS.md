@@ -27,7 +27,8 @@ pi 扩展包：把官方 Antigravity CLI 的 `agy acp` 接成 pi 的 provider `a
 详见 `docs/design.md`。改动以下任何一条之前，先和维护者确认：
 
 - 权限完全放行：权限请求自动回复 `allow_once`；维护类的临时会话、以及用户已按停止的回合则拒绝。agy 的 `interaction_*` 提问仍然询问用户。
-- 发给 agy 的只有用户输入、图片、其他模型插话的简短说明、必要时带标记的历史转录、只读会话的一行说明，以及压缩时代发的 `/compact`。不发送 pi 的 system prompt、工具清单或 skills。
+- 发给 agy 的只有用户输入、图片、其他模型插话的简短说明、必要时带标记的历史转录、只读会话的一行说明，以及压缩时代发的 `/compact`。不发送 pi 的 system prompt、工具清单或 skills。唯一的例外是 pi-web 里允许委派的会话会挂一个只有 `subagent` 工具的 MCP server。
+- pi-web 子代理（design 3.14）：MCP 工具只负责发起和 `resume`，等待交给 agy 后台运行的 `pi-agent wait`（agy 的 MCP 调用最多 180 秒）。父会话按停止不停子代理；子代理会话不挂 MCP；不提供 steer/abort。运行全部交给 pi-web 的子代理桥，插件不自己实现子代理。
 - agy 执行过的操作用隐藏的镜像工具（`agy_*`）展示，镜像工具只等待 ACP 的结果，绝不重新执行。
 - 不把 agy 的 slash 命令注册到 pi，不提供 agy mode 切换；管理命令只有 `/agy`。
 - 压缩不取消 pi 自己的流程：pi 的 `/compact` 先让 agy 压缩再照常做摘要，`/agy compact` 只压缩 agy。
@@ -44,6 +45,7 @@ pi 扩展包：把官方 Antigravity CLI 的 `agy acp` 接成 pi 的 provider `a
 - `src/runtime.ts`：共享进程、ACP 会话、收发和权限应答、模型目录探测、空闲退出。
 - `src/turn.ts`：一个 turn 的事件队列和阶段，agy 自己的工作何时算结束的判定。
 - `src/acp.ts`：NDJSON JSON-RPC 和进程组生命周期。
+- `src/subagents.ts` / `src/pi-agent.mjs`：pi-web 子代理。MCP 协议和 unix socket 在插件里，`pi-agent.mjs` 是 agy 拉起的中继和 `wait` 命令。
 - `src/bindings.ts` / `src/replay.ts` / `src/mirror.ts` / `src/catalog.ts`：会话映射、历史转录、工具卡片形状、模型缓存。
 - `docs/research/agy-acp-handshake.md`：agy 实测的协议形状。改协议处理前先对照这份文档；agy 升级后用 `docs/research/probe/` 重新实测。
 
